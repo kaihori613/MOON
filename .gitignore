@@ -1,0 +1,22 @@
+# Arduino build output
+build/
+*.hex
+*.elf
+*.bin
+*.eep
+*.map
+*.o
+*.a
+
+# Editor / IDE
+.vscode/
+*.swp
+*~
+
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
