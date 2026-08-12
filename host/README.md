@@ -52,6 +52,10 @@ Fill in `site.latitude_deg` / `site.longitude_deg` — **East-positive**, so
 pointed confidently at the wrong sky because a placeholder went unnoticed is
 worse than a program that refuses to start.
 
+That is enough for `--dry-run` to print the look angles, which is worth checking
+against a map before anything can move. The linkage below can stay blank until
+the actuator is drivable — the azimuth depends only on where you are standing.
+
 ## Calibrating the linkage
 
 The program needs to convert a heading into reed counts. Two models, picked by

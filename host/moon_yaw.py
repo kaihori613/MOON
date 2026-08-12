@@ -340,29 +340,65 @@ def main(argv=None):
 
     try:
         cfg = Config.load(args.config)
-        linkage = cfg.linkage()
     except ConfigError as exc:
         print(f"config: {exc}", file=sys.stderr)
         return 2
 
-    print(f"site     {cfg.site[0]:.4f}, {cfg.site[1]:.4f} at {cfg.site[2]:.0f} m")
-    print(f"linkage  {linkage.describe()}")
+    # The linkage cannot be calibrated until the actuator can be driven and
+    # mm_per_count has been measured, but the look angles depend only on the
+    # site coordinates. So a dry run stays useful with the linkage still blank
+    # -- checking the azimuth against a map is worth doing early, and long
+    # before anything can move.
+    linkage = None
+    linkage_problem = None
+    try:
+        linkage = cfg.linkage()
+    except (ConfigError, LinkageError) as exc:
+        if not args.dry_run:
+            print(f"config: {exc}", file=sys.stderr)
+            return 2
+        linkage_problem = exc
+
+    try:
+        lat, lon, alt = cfg.site
+    except ConfigError as exc:
+        print(f"config: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"site     {lat:.4f}, {lon:.4f} at {alt:.0f} m")
+    print(f"linkage  {linkage.describe() if linkage else 'not calibrated'}")
     print(f"trim     {cfg.trim:+d} counts (saved)")
 
     if args.dry_run:
-        try:
-            counts, az, el, info = compute_target(cfg, linkage)
-        except (ConfigError, LinkageError) as exc:
-            print(f"\n{exc}", file=sys.stderr)
-            return 2
+        az_true, el, rng = look_angles(lat, lon, alt, cfg.satellite_lon)
         print()
-        print(f"{cfg.satellite_name}: azimuth {info['az_true']:.3f} deg true, "
-              f"elevation {info['elevation']:.3f} deg, "
-              f"range {info['range_km']:.0f} km")
-        print(f"yaw target: {counts:.1f} counts {cfg.trim:+d} trim "
-              f"= {counts + cfg.trim:.0f}")
-        print(f"resolution at that point: "
-              f"{degrees_per_count(linkage, counts):.4f} deg per reed count")
+        print(f"{cfg.satellite_name}: azimuth {az_true:.3f} deg true, "
+              f"elevation {el:.3f} deg, range {rng / 1000.0:.0f} km")
+
+        if el <= 0.0:
+            print("\n! that is below the horizon -- check the site coordinates, "
+                  "and\n  remember longitude is East-positive.", file=sys.stderr)
+            return 2
+
+        az = cfg.to_linkage_frame(az_true)
+        if abs(az - az_true) > 1e-9:
+            print(f"{'':13}{az:.3f} deg magnetic (linkage frame)")
+
+        if linkage is None:
+            print(f"\nno yaw target: {linkage_problem}")
+            print("The azimuth above is still valid -- it depends only on where "
+                  "you are.")
+        else:
+            try:
+                counts = linkage.counts_for_angle(az)
+            except LinkageError as exc:
+                print(f"\n! {exc}", file=sys.stderr)
+                return 2
+            print(f"yaw target: {counts:.1f} counts {cfg.trim:+d} trim "
+                  f"= {counts + cfg.trim:.0f}")
+            print(f"resolution at that point: "
+                  f"{degrees_per_count(linkage, counts):.4f} deg per reed count")
+
         print("\n(dry run -- nothing was moved)")
         return 0
 
