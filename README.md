@@ -15,6 +15,10 @@ constants as placeholders until the bench measurements replace them.
 | Sensor bench test | Ready to run — needs only the Arduino and the reed switch |
 | Actuator control system | Complete, compiles, unvalidated. Waiting on the power control unit |
 | Simulator | Working — exercises the full state machine with no motor |
+| Host yaw pointing | Written, never executed — no Python on the build machine yet |
+
+The single actuator is assigned to **yaw**. The field test on 11 Aug 2026 showed
+yaw needs tighter pointing than pitch, so pitch stays set by hand.
 
 ## Sketches
 
@@ -38,6 +42,21 @@ console — type `?` for commands.
 
 Supports three motor drivers, selected in `ActuatorConfig.h`:
 PWM+DIR (Cytron), dual PWM (BTS7960), or a relay pair.
+
+### `host/`
+
+Python, runs on the PC over USB. Homes the actuator, computes where GOES-18 is
+from the site coordinates, drives yaw there, then hands the keyboard over for
+manual peaking with the arrow keys.
+
+The manual step stores a **trim** — an offset added to every computed target —
+rather than a position, so re-homing or recomputing does not discard it. GOES-18
+is geostationary, so from a fixed site the look angle never changes: peak once
+and the trim is a permanent site correction.
+
+The satellite math lives here rather than in the sketch because it wants
+floating-point trig and a config file. See [host/README.md](host/README.md) for
+the linkage calibration procedure.
 
 ## Two things worth knowing before reading the code
 
@@ -74,6 +93,12 @@ draw, real pulse timing, wiring, or EMI.
 
 ## Known open issues
 
+- **Nothing in `host/` has ever been executed** — there is no Python on the
+  build machine. `test_geometry.py` was written alongside the math but has not
+  been run, so treat the pointing angles as unchecked until it passes.
+- Yaw resolution is unknown until `mm_per_count` is measured on the bench. One
+  reed count is the floor on pointing accuracy; if it turns out coarser than the
+  link needs, the fix is a longer moment arm on the linkage, not software.
 - Reed noise rejection is debounce-only. A PWM bridge switching amps near an
   unshielded sensor run will inject counts that permanently corrupt position.
   Wants an RC filter and a stronger pull-up.

@@ -8,6 +8,16 @@ build/
 *.o
 *.a
 
+# Python (host/)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Site-specific: holds the station coordinates and the tuned trim. The blank
+# template that generates it lives in host/config.py.
+host/config.json
+
 # Editor / IDE
 .vscode/
 *.swp
