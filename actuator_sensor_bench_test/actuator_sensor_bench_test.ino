@@ -53,7 +53,11 @@ volatile unsigned long lastPulseMicros = 0;
 volatile unsigned long lastPulseInterval = 0;
 
 unsigned long lastPrintedCount = 0;
-unsigned long testStartMillis = 0;
+// Timing is measured from the FIRST PULSE of a run, not from the reset. You
+// reset the counter and then reach over and switch on the supply, and that
+// dead time is not part of the stroke -- counting it would understate the
+// pulse rate by however long you took.
+unsigned long firstPulseMillis = 0;
 
 // Run statistics. A "run" is one uninterrupted stroke; it ends automatically
 // once pulses stop arriving for RUN_IDLE_MS, which is what happens when the
@@ -65,7 +69,18 @@ unsigned long maxGapUs      = 0;              // slowest = lowest pulse rate
 unsigned long lastPulseSeen = 0;
 bool          runActive     = false;
 
-void resetRun(const __FlashStringHelper* why) {
+// Totals from recent full strokes. The cam limit switches are not wired to
+// the Arduino -- they cut motor current inside the actuator -- so the only
+// evidence we get that they fired is that pulses stopped. What tells us they
+// fired in the SAME PLACE every time is these totals agreeing.
+const uint8_t RUN_HISTORY = 4;
+unsigned long runTotals[RUN_HISTORY];
+uint8_t       runsStored = 0;
+
+// Zero everything and arm for the next stroke. Silent, because this runs
+// automatically at the end of every run and a message each time would bury
+// the summary you actually want to read.
+void zeroCounters() {
   noInterrupts();
   pulseCount = 0;
   interrupts();
@@ -73,13 +88,17 @@ void resetRun(const __FlashStringHelper* why) {
   minGapUs         = 0xFFFFFFFFUL;
   maxGapUs         = 0;
   runActive        = false;
-  testStartMillis  = millis();
+  firstPulseMillis = 0;            // re-armed by the next pulse
+}
+
+void resetRun(const __FlashStringHelper* why) {
+  zeroCounters();
   Serial.print(F(">>> counter reset -- "));
   Serial.println(why);
 }
 
 void printRunSummary(unsigned long count) {
-  const float elapsedSec = (lastPulseSeen - testStartMillis) / 1000.0;
+  const float elapsedSec = (lastPulseSeen - firstPulseMillis) / 1000.0;
 
   Serial.println();
   Serial.println(F("--- run summary ----------------------------------------"));
@@ -87,9 +106,11 @@ void printRunSummary(unsigned long count) {
   Serial.print(F("  duration      : ")); Serial.print(elapsedSec, 2);
   Serial.println(F(" s"));
 
-  if (elapsedSec > 0) {
+  // N pulses span N-1 intervals, so the rate is (count-1)/duration. Using
+  // count/duration would overstate it, most noticeably on short runs.
+  if (elapsedSec > 0 && count > 1) {
     Serial.print(F("  average rate  : "));
-    Serial.print(count / elapsedSec, 2);
+    Serial.print((count - 1) / elapsedSec, 2);
     Serial.println(F(" Hz"));
   }
 
@@ -116,10 +137,38 @@ void printRunSummary(unsigned long count) {
   Serial.println(F("  -- copy into ActuatorConfig.h --"));
   Serial.print(F("  REED_DEBOUNCE_US  = ")); Serial.println(suggDebounce);
   Serial.print(F("  STALL_TIMEOUT_MS  = ")); Serial.println(suggStall);
+  // --- cam limit switch repeatability ------------------------------------
+  if (runsStored == RUN_HISTORY) {
+    for (uint8_t i = 0; i < RUN_HISTORY - 1; i++) runTotals[i] = runTotals[i + 1];
+    runsStored--;
+  }
+  runTotals[runsStored++] = count;
+
+  if (runsStored > 1) {
+    unsigned long lo = runTotals[0], hi = runTotals[0];
+    Serial.print(F("  recent strokes: "));
+    for (uint8_t i = 0; i < runsStored; i++) {
+      if (i) Serial.print(F(", "));
+      Serial.print(runTotals[i]);
+      if (runTotals[i] < lo) lo = runTotals[i];
+      if (runTotals[i] > hi) hi = runTotals[i];
+    }
+    Serial.println();
+
+    const unsigned long spread = hi - lo;
+    Serial.print(F("  spread        : ")); Serial.print(spread);
+    Serial.println(spread <= 2 ? F(" counts -- cam switches are repeatable")
+                               : F(" counts -- TOO WIDE, see below"));
+  }
+
   Serial.println(F("--------------------------------------------------------"));
-  Serial.println(F("Run the same stroke again -- the pulse count should match"));
-  Serial.println(F("to within a count or two. If it does not, the sensor or"));
-  Serial.println(F("the debounce is wrong and nothing downstream can be trusted."));
+  Serial.println(F("A summary appearing while the supply is still ON means a"));
+  Serial.println(F("cam limit switch cut the motor -- that is the switch"));
+  Serial.println(F("working. Check the supply's current display: it should"));
+  Serial.println(F("drop to near zero at the same moment. If current is still"));
+  Serial.println(F("flowing, the motor is running and the SENSOR stopped"));
+  Serial.println(F("counting instead -- a completely different fault, and one"));
+  Serial.println(F("this sketch cannot tell apart on its own."));
   Serial.println();
 }
 
@@ -142,11 +191,15 @@ void setup() {
 
   attachInterrupt(digitalPinToInterrupt(REED_PIN), handleReedPulse, FALLING);
 
-  testStartMillis = millis();
+  firstPulseMillis = 0;          // set by the first pulse, not by boot
 
   Serial.println(F("=== Actuator Reed Switch Bench Test ==="));
-  Serial.println(F("Drive the actuator from your bench DC supply and watch"));
-  Serial.println(F("the pulse count below. Press the reset button to zero it."));
+  Serial.println(F("Counting is automatic. Switch the supply on and the count"));
+  Serial.println(F("starts at 1; switch it off (or let a cam switch stop the"));
+  Serial.println(F("motor) and after 1.5s of silence the run summary prints"));
+  Serial.println(F("and the counter zeroes itself for the next stroke."));
+  Serial.println(F("Nothing to press between runs. Send any character to"));
+  Serial.println(F("abandon a run early."));
   Serial.println();
 }
 
@@ -170,7 +223,8 @@ void loop() {
   interrupts();
 
   if (count != lastPrintedCount) {
-    float elapsedSec = (millis() - testStartMillis) / 1000.0;
+    if (count == 1) firstPulseMillis = millis();   // the stroke starts here
+    float elapsedSec = (millis() - firstPulseMillis) / 1000.0;
     float hz = interval > 0 ? 1000000.0 / interval : 0;
 
     // Skip the first pulse of a run: its "gap" is measured from whenever the
@@ -199,5 +253,6 @@ void loop() {
   if (runActive && millis() - lastPulseSeen > RUN_IDLE_MS) {
     runActive = false;
     printRunSummary(count);
+    zeroCounters();     // armed: the next pulse begins a fresh run at 1
   }
 }
