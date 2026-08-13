@@ -12,7 +12,7 @@ constants as placeholders until the bench measurements replace them.
 
 | Component | State |
 |---|---|
-| Sensor bench test | Ready to run — needs only the Arduino and the reed switch |
+| Bench tests (3 sketches) | Ready to run — need only the Arduino and the reed switch. Not yet compiled |
 | Actuator control system | Complete, compiles, unvalidated. Waiting on the power control unit |
 | Simulator | Working — exercises the full state machine with no motor |
 | Host yaw pointing | Written, never executed — no Python on the build machine yet |
@@ -22,16 +22,43 @@ yaw needs tighter pointing than pitch, so pitch stays set by hand.
 
 ## Sketches
 
-### `actuator_sensor_bench_test/`
+### Bench tests
 
-Counts reed-switch pulses while the actuator is driven from a bench DC supply.
-Detects the end of each stroke automatically (pulses stop when the cam limit
-switch cuts motor current) and prints a run summary with the measured pulse
-rates and the config values derived from them.
+Three sketches, all driven from the bench supply — none of them touches the
+motor. Wiring for all three: reed switch to **D2** and **GND**, nothing else.
 
-Wiring: reed switch to **D2** and **GND**. Nothing else.
+| sketch | question it answers |
+|---|---|
+| `reed_switch_test/` | Is the sensor clean? |
+| `cam_switch_test/` | Do the end stops fire in the same place every time? |
+| `actuator_sensor_bench_test/` | Both, condensed — plus scale, the config block, and a go/no-go gate |
 
-This is the source of every timing constant used downstream. Run it first.
+**`reed_switch_test/`** — one pulse per magnet pass, or more? The interrupt
+records every falling edge and rejects nothing; debounce is applied afterwards
+in `loop()`, so the report can show what it *would* have discarded. A sensor
+that needs heavy filtering to look clean is one about to lose counts at speed,
+and a sketch that hides its rejects will never show you that. Prints a gap
+histogram — one cluster is healthy, two means double-counting. Debounce is
+adjustable live with `d`, no reflashing between guesses. Also measures the
+noise floor with the actuator stopped, where every edge is electrical pickup.
+
+**`cam_switch_test/`** — homing drives into the retract stop and calls that
+zero, so if the stop moves, the entire coordinate system moves with it. Keeps
+statistics per end (they are different switches, with no reason to assume equal
+repeatability) and cross-checks that both directions measure the same travel.
+
+Because the cam switches cut motor current internally and are not wired to the
+Arduino, "the switch fired" is inferred from pulses stopping — which is also
+exactly what a sensor dropout looks like. So the sketch asks you to confirm the
+supply current after every stroke. You are the missing sensor.
+
+**`actuator_sensor_bench_test/`** — the acceptance gate. Everything above in one
+session, plus millimetres per count (enter the measured stroke with `m`),
+degrees per count (enter the moment arm with `a`), a paste-ready
+`ActuatorConfig.h` block, and a PASS/FAIL line per criterion so the answer to
+"is this good enough to close a loop around?" is stated rather than eyeballed.
+
+Start here. Drop to the focused sketches when this one reports a problem.
 
 ### `actuator_system/`
 
