@@ -14,7 +14,7 @@ replace them.
 |---|---|
 | `reed_switch_test/` | **Run on hardware.** Sensor is clean — see below |
 | `l298n_test/`, `actuator_test/` | **Bring-up. The motor turned.** Superseded by `actuator_v1/` |
-| `actuator_v1/` | **Compiles clean, 53% flash / 16% RAM on a 328P. Never run.** |
+| `actuator_v1/` | **Compiles clean, 81% flash / 35% RAM on a 328P. Never run.** |
 | Host yaw pointing | Written, never executed — no Python on the build machine yet |
 
 An earlier lineage, `actuator_system/`, was deleted in favour of v1. It was
@@ -111,6 +111,42 @@ oscillation — which makes the resolution of this system one reed count plus
 coast. If that is coarser than yaw needs, the fix is a longer moment arm on the
 linkage, not software.
 
+**Zero sits at the middle of the stroke.** Homing still drives into the retract
+cam — that is the only direction-unambiguous move there is, so it stays the
+reference — but the origin is then shifted to the midpoint, so negative is
+retracted, positive is extended, and the remaining headroom each way is obvious.
+Set `ORIGIN_AT_MIDPOINT` to `0` to put zero back on the retract stop. The
+midpoint cannot be located until the travel is known, so `c` is required; a
+plain `h` before any calibration falls back to zero at the stop.
+
+**It reads out in degrees.** A straight-line fit of heading against counts,
+calibrated on the bench with `a` and `b` — sight the boom, type the heading,
+drive along the stroke, sight again. That solves both constants and saves them.
+Until it is calibrated the readout shows `?` rather than a confident wrong
+number. The fit is anchored to the retract stop rather than to position zero,
+so choosing the midpoint origin does not silently invalidate it.
+
+This is a *readout*, not the pointing authority. `host/geometry.py` keeps the
+physically-correct triangle model; the sketch carries the linear approximation
+so the bench can show degrees with no PC attached.
+
+**It remembers, but does not trust.** Position, travel and the angle fit are
+saved to EEPROM on every stop. On boot they are loaded and displayed — and
+`homed` stays false, so absolute moves still refuse until you home. What the
+saved position is *for* is the next home: the difference between where the cam
+actually trips and where the saved position said it would be is drift, printed
+in counts. That is the same measurement as end-stop repeatability, and there is
+currently no other way to see it. A saved position used to skip homing would be
+silently wrong exactly when something back-drove the dish; used as a check, the
+same number becomes an instrument.
+
+**Optional 16x2 I2C LCD** on A4/A5, showing position, degrees, and state. The
+HD44780-behind-a-PCF8574 driver is written directly onto `Wire` rather than
+pulling in a library — the several `LiquidCrystal_I2C` forks disagree about
+constructor arguments, and the whole driver is under a hundred lines. If nothing
+acknowledges at the I2C address the sketch says so and runs without it. Set
+`USE_LCD` to `0` to drop it entirely.
+
 Set `MOTOR_DRIVER` in `Config.h` — L298N (default) or HW-039. Everything
 tunable lives in that file; constants marked PLACEHOLDER have not been measured
 yet. The `n` command re-runs the reed noise floor with the bridge powered and in
@@ -196,6 +232,9 @@ has finished moving and the landing reports lie to you.
   landing report lies. It is the first constant to nail down on the bench.
 - No off-target tests for the state machine, and no simulator any more, so
   there is currently no way to exercise it without hardware.
-- `h` discards the calibrated travel figure, though it re-establishes the same
-  origin `c` used. Home and calibrate should share the span; only `z` should
-  drop it. Two-line fix, not yet applied.
+- **The degrees readout is uncalibrated and shows `?`.** `a`/`b` fix that in a
+  couple of minutes with a compass, but it needs the actuator drivable first.
+- Flash is at 81%, up from 53% before the LCD and EEPROM went in. `Wire` and
+  `snprintf`'s formatting machinery are most of the difference. Still room, but
+  not much — dropping `USE_LCD` recovers a large part of it if something more
+  important needs the space.

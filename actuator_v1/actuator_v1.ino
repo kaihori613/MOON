@@ -1,5 +1,17 @@
 #include "Config.h"
 
+#if USE_LCD
+  #include <Wire.h>
+#endif
+#if USE_EEPROM
+  #include <EEPROM.h>
+#endif
+
+// Defined down with the persistence code, called from motion code above it.
+// The IDE would synthesise this prototype; saying it out loud means the file
+// also compiles with a plain avr-g++ invocation.
+void saveState();
+
 volatile long          g_counts      = 0;   // signed position, in reed counts
 volatile unsigned long g_pulses      = 0;   // lifetime total, unsigned
 volatile unsigned long g_lastPulseUs = 0;
@@ -169,6 +181,40 @@ long     g_step    = STEP_COUNTS_DEFAULT;
 uint16_t g_jogMs   = JOG_MS_DEFAULT;
 bool     g_telem   = true;
 
+// Angle readout. Anchored to the retract stop, not to position zero, so
+// moving the origin does not silently invalidate it.
+float g_degPerCount  = DEG_PER_COUNT_DEFAULT;
+float g_degAtRetract = DEG_AT_RETRACT_DEFAULT;
+
+// Two-point angle calibration, held between 'a' and 'b'.
+bool g_havePointA = false;
+long g_posA       = 0;
+float g_degA      = 0.0f;
+
+// Drift check. A saved position is loaded at boot and believed provisionally;
+// the next home is what tests it, and only if nothing has moved since.
+bool g_driftArmed = false;
+bool g_virginBoot = true;
+
+// ---------------------------------------------------------------------------
+//  Where zero sits
+// ---------------------------------------------------------------------------
+//  The retract cam is always the reference. This is only where we choose to
+//  put the number zero relative to it.
+
+long retractStopPos() {
+#if ORIGIN_AT_MIDPOINT
+  if (g_travel > 0) return -(g_travel / 2);
+#endif
+  return 0;
+}
+
+bool haveAngle() { return g_degPerCount != 0.0f; }
+
+float degreesNow() {
+  return g_degAtRetract + (position() - retractStopPos()) * g_degPerCount;
+}
+
 const __FlashStringHelper* stateName() {
   switch (g_state) {
     case ST_IDLE:    return F("IDLE");
@@ -203,6 +249,7 @@ void startMotion(char dir, uint8_t speed) {
   }
 
   g_dir           = dir;
+  g_virginBoot    = false;    // the drift check only survives an untouched boot
   g_motionStartMs = millis();
   g_pulsesAtStart = pulseTotal();
   g_nextTelemMs   = g_motionStartMs + TELEMETRY_MS;
@@ -221,6 +268,7 @@ void enterIdle() {
   g_state       = ST_IDLE;
   g_jogEndMs    = 0;
   g_calibrating = false;   // a calibration stopped part-way is not still owed
+  saveState();
 }
 
 void enterFault(Fault f) {
@@ -257,8 +305,8 @@ bool motionStalled(unsigned long now) {
 //  survivable, since that is what they are for.
 
 bool haveSoftLimits() { return g_homed && g_travel > 0; }
-long softMin() { return SOFT_LIMIT_MARGIN; }
-long softMax() { return g_travel - SOFT_LIMIT_MARGIN; }
+long softMin() { return retractStopPos() + SOFT_LIMIT_MARGIN; }
+long softMax() { return retractStopPos() + g_travel - SOFT_LIMIT_MARGIN; }
 
 long clampToLimits(long counts, bool* clamped) {
   *clamped = false;
@@ -371,6 +419,10 @@ void startHome(bool thenMeasure) {
     return;
   }
 
+  // Only a home that is the first motion since boot can test the saved
+  // position -- anything else has already moved the carriage out from under it.
+  g_driftArmed  = g_virginBoot && g_driftArmed;
+
   g_calibrating = thenMeasure;
   g_state       = ST_HOME;
   g_jogEndMs    = 0;
@@ -387,15 +439,20 @@ void zeroHere() {
   g_target = 0;
   g_homed  = true;
 
-  // The travel figure was measured from the old origin. Keeping it here would
-  // leave the soft limits sitting somewhere that no longer corresponds to the
-  // mechanical stops, which is worse than having no soft limits at all.
+  // Unlike 'h', this invents an origin with no physical reference behind it.
+  // Everything anchored to the retract stop is therefore now meaningless.
   if (g_travel > 0) {
     g_travel = 0;
     Serial.println(F("  travel forgotten -- it was measured from the old"));
     Serial.println(F("  origin, so the soft limits no longer line up. Run 'c'."));
   }
+  if (haveAngle()) {
+    g_degPerCount = 0.0f;
+    Serial.println(F("  angle calibration dropped -- it was anchored to the"));
+    Serial.println(F("  retract stop, which this no longer locates. Redo a/b."));
+  }
   Serial.println(F("  zero = here"));
+  saveState();
 }
 
 // ---------------------------------------------------------------------------
@@ -494,29 +551,68 @@ void onStall() {
 
   switch (g_state) {
     case ST_HOME:
-      setPosition(0);
+      // The drift check, and the only chance to make it. If a saved position
+      // was loaded and nothing has moved since boot, the counter should have
+      // wound down to exactly the retract stop. Whatever is left over is how
+      // far the dish moved while the power was off.
+      if (g_driftArmed) {
+        const long drift = position() - retractStopPos();
+        Serial.print(F("  drift since last save: "));
+        Serial.print(drift);
+        Serial.println(F(" counts"));
+        if (drift == 0) {
+          Serial.println(F("  Nothing moved while the power was off."));
+        } else {
+          Serial.println(F("  Something back-drove the actuator, or the cam does"));
+          Serial.println(F("  not trip in the same place twice. Either way this"));
+          Serial.println(F("  is the error an un-checked saved position would"));
+          Serial.println(F("  have inherited silently."));
+        }
+        g_driftArmed = false;
+      }
+
+      // During a calibration the midpoint is not known yet, so the home leg
+      // always lands on zero and the origin is shifted afterwards.
+      setPosition(g_calibrating ? 0 : retractStopPos());
       g_homed  = true;
-      g_target = 0;
-      Serial.println(F("  reached the near stop -- this is zero"));
+      g_target = position();
+
+      Serial.print(F("  reached the near stop -- pos = "));
+      Serial.println(position());
 
       if (g_calibrating) {
         g_state = ST_MEASURE;
         Serial.println(F("  MEASURING -- extending into the far stop."));
         startMotion('e', SPEED_HOMING);
       } else {
-        g_state  = ST_IDLE;
-        g_travel = 0;      // origin moved; any old span no longer applies
+        // Homing re-establishes the SAME reference 'c' measured against, so a
+        // known travel still applies. Only 'z' invents a new origin.
+        g_state = ST_IDLE;
+        saveState();
       }
       return;
 
     case ST_MEASURE:
-      g_travel      = position();
+      g_travel      = position();      // home leg left us at zero
       g_calibrating = false;
       g_state       = ST_IDLE;
 
       Serial.print(F("  reached the far stop -- travel = "));
       Serial.print(g_travel);
       Serial.println(F(" counts"));
+
+#if ORIGIN_AT_MIDPOINT
+      // Now the midpoint is known, so shift the whole coordinate system onto
+      // it. The near stop sits at 0 right now and needs to land on
+      // retractStopPos(), so that offset is exactly what everything moves by.
+      // Deriving it from retractStopPos() rather than halving travel again is
+      // what keeps the two agreeing when travel is an odd number of counts.
+      setPosition(position() + retractStopPos());
+      Serial.print(F("  origin moved to the midpoint -- pos = "));
+      Serial.println(position());
+#endif
+      g_target = position();
+
       Serial.print(F("  soft limits now "));
       Serial.print(softMin());
       Serial.print(F(" .. "));
@@ -526,6 +622,7 @@ void onStall() {
         Serial.println(F("  That is implausibly short. Either it never left the"));
         Serial.println(F("  near stop, or the sensor is not producing pulses."));
       }
+      saveState();
       return;
 
     case ST_JOG:
@@ -646,6 +743,174 @@ void noiseFloorTest() {
 }
 
 // ---------------------------------------------------------------------------
+//  Persistence
+// ---------------------------------------------------------------------------
+//  Saved so the next home can CHECK it, not so homing can be skipped. See the
+//  note in Config.h.
+
+#if USE_EEPROM
+struct SavedState {
+  uint16_t magic;
+  long     position;
+  long     travel;
+  float    degPerCount;
+  float    degAtRetract;
+  uint16_t sum;
+};
+
+const uint16_t SAVE_MAGIC = 0xAC71;
+
+uint16_t saveSum(const SavedState& s) {
+  const uint8_t* p = (const uint8_t*)&s;
+  uint16_t sum = 0;
+  for (size_t i = 0; i < sizeof(SavedState) - sizeof(uint16_t); i++) sum += p[i];
+  return sum;
+}
+
+void saveState() {
+  SavedState s;
+  s.magic        = SAVE_MAGIC;
+  s.position     = position();
+  s.travel       = g_travel;
+  s.degPerCount  = g_degPerCount;
+  s.degAtRetract = g_degAtRetract;
+  s.sum          = saveSum(s);
+
+  // update() rather than write(), so an unchanged byte costs no wear.
+  const uint8_t* p = (const uint8_t*)&s;
+  for (size_t i = 0; i < sizeof(s); i++) EEPROM.update(EEPROM_BASE_ADDR + i, p[i]);
+}
+
+bool loadState(SavedState* out) {
+  SavedState s;
+  uint8_t* p = (uint8_t*)&s;
+  for (size_t i = 0; i < sizeof(s); i++) p[i] = EEPROM.read(EEPROM_BASE_ADDR + i);
+
+  if (s.magic != SAVE_MAGIC) return false;
+  if (s.sum != saveSum(s))   return false;
+  *out = s;
+  return true;
+}
+#else
+void saveState() {}
+#endif
+
+// ---------------------------------------------------------------------------
+//  LCD  --  HD44780 behind a PCF8574, 4-bit, straight onto Wire
+// ---------------------------------------------------------------------------
+
+#if USE_LCD
+// The near-universal backpack bit map.
+const uint8_t LCD_RS = 0x01;   // P0
+const uint8_t LCD_EN = 0x04;   // P2
+const uint8_t LCD_BL = 0x08;   // P3, backlight -- held on
+
+bool g_lcdOk = false;          // false if nothing acknowledged at the address
+
+void lcdExpander(uint8_t bits) {
+  Wire.beginTransmission(LCD_I2C_ADDR);
+  Wire.write(bits | LCD_BL);
+  Wire.endTransmission();
+}
+
+void lcdPulse(uint8_t bits) {
+  lcdExpander(bits | LCD_EN);
+  delayMicroseconds(2);
+  lcdExpander(bits & ~LCD_EN);
+  delayMicroseconds(50);
+}
+
+void lcdSend(uint8_t value, uint8_t mode) {
+  lcdPulse((value & 0xF0) | mode);
+  lcdPulse(((value << 4) & 0xF0) | mode);
+}
+
+void lcdCommand(uint8_t c) { lcdSend(c, 0); }
+
+void lcdBegin() {
+  Wire.begin();
+  Wire.setClock(400000);       // ~2 ms for a full refresh instead of ~7
+
+  Wire.beginTransmission(LCD_I2C_ADDR);
+  g_lcdOk = (Wire.endTransmission() == 0);
+  if (!g_lcdOk) return;        // nothing there; every call below turns into a no-op
+
+  delay(50);
+  lcdExpander(0);
+  delay(20);
+
+  // The HD44780 4-bit wake-up sequence, which is not optional and not pretty.
+  lcdPulse(0x30); delay(5);
+  lcdPulse(0x30); delayMicroseconds(150);
+  lcdPulse(0x30); delayMicroseconds(150);
+  lcdPulse(0x20); delayMicroseconds(150);
+
+  lcdCommand(0x28);   // 4-bit, 2 lines, 5x8
+  lcdCommand(0x0C);   // on, no cursor
+  lcdCommand(0x06);   // entry mode: advance right
+  lcdCommand(0x01);   // clear
+  delay(2);
+}
+
+// Writes exactly LCD_COLS characters, so a shorter line erases what was under
+// it without a clear() and the flicker that brings.
+void lcdLine(uint8_t row, const char* s) {
+  if (!g_lcdOk) return;
+  lcdCommand(0x80 | (row ? 0x40 : 0x00));
+  bool ended = false;
+  for (uint8_t i = 0; i < LCD_COLS; i++) {
+    if (s[i] == '\0') ended = true;
+    lcdSend(ended ? ' ' : (uint8_t)s[i], LCD_RS);
+  }
+}
+
+unsigned long g_lcdNextMs = 0;
+
+void lcdUpdate(unsigned long now) {
+  if (!g_lcdOk || now < g_lcdNextMs) return;
+  g_lcdNextMs = now + LCD_REFRESH_MS;
+
+  char l1[LCD_COLS + 1];
+  char l2[LCD_COLS + 1];
+  char deg[8];
+
+  if (haveAngle()) dtostrf(degreesNow(), 6, 1, deg);
+  else             strcpy(deg, "     ?");
+
+  snprintf(l1, sizeof(l1), "%6ldct %6s", position(), deg);
+
+  switch (g_state) {
+    case ST_SEEK:
+      snprintf(l2, sizeof(l2), "SEEK  ->%7ld", g_target);
+      break;
+    case ST_JOG:
+      snprintf(l2, sizeof(l2), "JOG %s", g_dir == 'e' ? "EXTEND" : "RETRACT");
+      break;
+    case ST_HOME:
+      strcpy(l2, "HOMING...");
+      break;
+    case ST_MEASURE:
+      strcpy(l2, "MEASURING...");
+      break;
+    case ST_FAULT:
+      snprintf(l2, sizeof(l2), "FAULT %s",
+               g_fault == FAULT_STALL   ? "STALL" :
+               g_fault == FAULT_TIMEOUT ? "TIMEOUT" : "NOT HOMED");
+      break;
+    default:
+      strcpy(l2, g_homed ? "IDLE  homed" : "IDLE  NOT homed");
+      break;
+  }
+
+  lcdLine(0, l1);
+  lcdLine(1, l2);
+}
+#else
+void lcdBegin() {}
+void lcdUpdate(unsigned long) {}
+#endif
+
+// ---------------------------------------------------------------------------
 //  Console
 // ---------------------------------------------------------------------------
 
@@ -667,6 +932,10 @@ void printStatus() {
   Serial.print(F("  step="));   Serial.print(g_step);
   Serial.print(F("  speed="));  Serial.print(g_speed);
 
+  Serial.print(F("  deg="));
+  if (haveAngle()) Serial.print(degreesNow(), 2);
+  else             Serial.print(F("? (run a/b)"));
+
   if (g_hitHardLimit && g_state == ST_IDLE) Serial.print(F("  [at hard stop]"));
   if (g_fault != FAULT_NONE) {
     Serial.print(F("  FAULT: "));
@@ -687,7 +956,9 @@ void printHelp() {
   Serial.println(F("  E / R        run until stopped"));
   Serial.println(F("  j <ms>       set the default jog time"));
   Serial.println(F("--- reference -------------------------------------------"));
-  Serial.println(F("  h            home: retract into the near stop, call it 0"));
+  Serial.println(F("  a <tenths>   angle calibration point A, e.g. 'a 1652'"));
+  Serial.println(F("  b <tenths>   point B -- solves and saves the fit"));
+  Serial.println(F("  h            home: retract into the near stop"));
   Serial.println(F("  c            calibrate: home, then learn the full travel"));
   Serial.println(F("  z            zero here (forgets travel -- see the code)"));
   Serial.println(F("--- everything else ------------------------------------"));
@@ -784,6 +1055,73 @@ void cmdSpeed(const char* arg) {
   if (g_state == ST_JOG && g_dir != 0) motorApply(g_dir, g_speed);
 }
 
+// Two-point angle calibration, the same linear fit host/geometry.py uses. Sight
+// the boom, type the heading, drive somewhere else, sight it again.
+void cmdAnglePoint(char which, const char* arg) {
+  long millideg;
+  if (!parseLong(arg, &millideg)) {
+    Serial.print(which);
+    Serial.println(F(" needs a heading in tenths of a degree: 'a 1652' = 165.2"));
+    return;
+  }
+  if (!g_homed) {
+    Serial.println(F("  home first -- the fit is anchored to the retract stop"));
+    return;
+  }
+  if (g_state != ST_IDLE) {
+    Serial.println(F("  not while it is moving"));
+    return;
+  }
+
+  const float deg = millideg / 10.0f;
+  const long  pos = position();
+
+  if (which == 'a') {
+    g_posA = pos;
+    g_degA = deg;
+    g_havePointA = true;
+    Serial.print(F("  point A: "));
+    Serial.print(deg, 1);
+    Serial.print(F(" deg at "));
+    Serial.println(pos);
+    Serial.println(F("  Now drive well along the stroke and sight again with 'b'."));
+    return;
+  }
+
+  if (!g_havePointA) {
+    Serial.println(F("  no point A yet -- 'a <heading>' first"));
+    return;
+  }
+  if (pos == g_posA) {
+    Serial.println(F("  same position as point A -- move first, or the slope"));
+    Serial.println(F("  is a division by zero"));
+    return;
+  }
+
+  g_degPerCount  = (deg - g_degA) / (float)(pos - g_posA);
+  g_degAtRetract = g_degA + (retractStopPos() - g_posA) * g_degPerCount;
+  g_havePointA   = false;
+
+  Serial.print(F("  point B: "));
+  Serial.print(deg, 1);
+  Serial.print(F(" deg at "));
+  Serial.println(pos);
+  Serial.print(F("  fit: "));
+  Serial.print(g_degPerCount, 4);
+  Serial.print(F(" deg/count, "));
+  Serial.print(g_degAtRetract, 2);
+  Serial.println(F(" deg at the retract stop"));
+  Serial.print(F("  one count = "));
+  Serial.print(fabs(g_degPerCount), 4);
+  Serial.println(F(" deg -- that is the hard floor on pointing"));
+
+  if (fabs(g_degPerCount) < 1e-5) {
+    Serial.println(F("  That slope is implausibly flat. Check the two headings"));
+    Serial.println(F("  were actually different."));
+  }
+  saveState();
+}
+
 void cmdDebounce(const char* arg) {
   long v;
   if (!parseLong(arg, &v)) {
@@ -874,6 +1212,9 @@ void handleCommand(char* line) {
     case 'd': cmdDebounce(arg); break;
     case 'n': noiseFloorTest(); break;
 
+    case 'a': cmdAnglePoint('a', arg); break;
+    case 'b': cmdAnglePoint('b', arg); break;
+
     case 'h': startHome(false); break;
     case 'c': startHome(true);  break;
 
@@ -960,8 +1301,35 @@ void setup() {
   Serial.println(F("Reed on D2. Position is counted, not measured -- it is"));
   Serial.println(F("only right while nothing back-drives the actuator."));
   Serial.println();
-  Serial.println(F("Nothing is homed. Relative moves (+3, -1) work anyway;"));
-  Serial.println(F("absolute moves need 'h' or 'c' first."));
+
+  lcdBegin();
+#if USE_LCD
+  Serial.print(F("LCD: "));
+  Serial.println(g_lcdOk ? F("found") : F("nothing at that address -- running without it"));
+#endif
+
+#if USE_EEPROM
+  SavedState saved;
+  if (loadState(&saved)) {
+    g_travel       = saved.travel;
+    g_degPerCount  = saved.degPerCount;
+    g_degAtRetract = saved.degAtRetract;
+    setPosition(saved.position);
+    g_driftArmed   = true;
+
+    Serial.print(F("Restored: pos="));   Serial.print(saved.position);
+    Serial.print(F(" travel="));         Serial.print(saved.travel);
+    Serial.println();
+    Serial.println(F("This is NOT trusted -- homed is still false and absolute"));
+    Serial.println(F("moves still refuse. It is loaded so the next 'h' can"));
+    Serial.println(F("measure how far things drifted while the power was off."));
+  } else {
+    Serial.println(F("No saved state. Nothing is homed."));
+  }
+#else
+  Serial.println(F("Nothing is homed."));
+#endif
+  Serial.println(F("Relative moves (+3, -1) work anyway; absolute needs h or c."));
   Serial.println();
   Serial.println(F("Supply 24 V, current limit 3-5 A. If the CC light comes on,"));
   Serial.println(F("the supply is limiting and the motor is not getting 24 V."));
@@ -973,4 +1341,5 @@ void setup() {
 void loop() {
   pollSerial();
   updateMotion();
+  lcdUpdate(millis());
 }
