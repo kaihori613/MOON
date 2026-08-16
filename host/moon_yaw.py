@@ -41,7 +41,7 @@ from geometry import LinkageError, degrees_per_count, look_angles
 from keys import KeyReader
 from link import ActuatorError, ActuatorFault, ActuatorLink
 
-# Keep in step with SOFT_LIMIT_MARGIN in actuator_system/ActuatorConfig.h. The
+# Keep in step with SOFT_LIMIT_MARGIN in actuator_v1/Config.h. The
 # sketch enforces its own copy; this one only exists so the host can warn
 # before sending a command it knows will be clamped.
 SOFT_LIMIT_MARGIN = 5
@@ -117,7 +117,10 @@ def run_auto_cycle(link: ActuatorLink, cfg: Config, linkage, force_home: bool):
                             on_progress=lambda s: _progress(f"  homing  pos={s['pos']}"))
         print(f"\r  homed at pos={st['pos']}" + " " * 20)
     else:
-        print(f"  already homed, pos={st['pos']} (restored from EEPROM)")
+        # actuator_v1 does not persist position, so it always boots un-homed and
+        # this branch never fires against it. Kept because it costs nothing and
+        # a later sketch may well restore a saved origin.
+        print(f"  already homed, pos={st['pos']}")
 
     counts, az, el, info = compute_target(cfg, linkage)
     target = counts + cfg.trim
@@ -416,7 +419,7 @@ def main(argv=None):
 
     if not link.saw_banner:
         print(f"\n! no boot banner from {args.port}. Continuing, but if commands")
-        print("  are ignored, check the baud rate and that actuator_system is")
+        print("  are ignored, check the baud rate and that actuator_v1 is")
         print("  the sketch actually loaded.")
 
     try:

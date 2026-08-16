@@ -5,18 +5,26 @@ the actuator's internal reed-switch position sensor.
 
 ## Status
 
-**The sensor has been measured. Nothing has driven the motor yet.**
-`reed_switch_test/` has run on the real actuator; everything downstream of it
-is still unvalidated, and the timing constants stay placeholders until the
-bench measurements replace them.
+**The sensor has been measured and the motor has been driven — but never both
+at once.** Everything that closes the loop between them is still unvalidated,
+and the timing constants stay placeholders until the bench measurements
+replace them.
 
 | Component | State |
 |---|---|
 | `reed_switch_test/` | **Run on hardware.** Sensor is clean — see below |
-| `actuator_test/` | Written, not compiled. The HW-039 has not yet turned the motor |
-| Actuator control system | Complete, compiles, unvalidated |
-| Simulator | Working — exercises the full state machine with no motor |
+| `l298n_test/`, `actuator_test/` | **Bring-up. The motor turned.** Superseded by `actuator_v1/` |
+| `actuator_v1/` | **Compiles clean, 53% flash / 16% RAM on a 328P. Never run.** |
 | Host yaw pointing | Written, never executed — no Python on the build machine yet |
+
+An earlier lineage, `actuator_system/`, was deleted in favour of v1. It was
+written before any hardware existed and never ran, but it carried a simulator
+that exercised the whole state machine with no motor attached, which v1 has no
+equivalent of. Recover it from git history if that turns out to be missed.
+
+Neither bring-up sketch read the reed while it drove, so the numbers those runs
+were built to produce — breakaway duty, stroke time each way, coast after stop
+— are the ones `actuator_v1/`'s placeholder constants are still waiting on.
 
 The single actuator is assigned to **yaw**. The field test on 11 Aug 2026 showed
 yaw needs tighter pointing than pitch, so pitch stays set by hand.
@@ -75,15 +83,41 @@ Reed pulses are counted and reported per run but nothing acts on them. A run
 that moves the rod while reporting zero pulses says the driver is fine and the
 sensor is the next problem.
 
-### `actuator_system/`
+### `actuator_v1/`
 
-Closed-loop position control. Homing against the retract hard stop, travel
-calibration, absolute and relative moves, soft limits, stall/jam detection,
-and EEPROM position persistence across power cycles. Driven from a serial
-console — type `?` for commands.
+The bring-up sketches with the loop closed around them. The motor code is
+unchanged from the code that actually turned the motor — same pins, same
+ordering, same dead time. Two things are new, and only two.
 
-Supports three motor drivers, selected in `ActuatorConfig.h`:
-PWM+DIR (Cytron), dual PWM (BTS7960), or a relay pair.
+**The input method.** The bring-up sketches offered a fixed one-second jog and
+a speed that moved in steps of fifteen, which is fine for "does the bridge turn
+the motor" and useless for "put the dish two counts to the left". Every command
+here takes an argument instead: `+3` is three counts extend, `e 250` is a
+quarter second of open-loop extend, `v 120` is a speed rather than eight
+presses of `-`. Bare Enter is STOP from any state, which is the reason the
+parser reads whole lines rather than single keys — the one input that must
+never need an argument.
+
+**The reed is read.** Position is pulses signed by the direction last
+commanded, so homing, absolute moves, soft limits and stall detection all
+follow. Relative moves work from boot; only absolute ones need an origin.
+
+Corrections only ever run in the original direction of travel. A move that
+settles short creeps on; a move that overshoots is reported and left alone.
+Reversing to recover one count means taking up the linkage backlash again, so
+the correction lands less predictably than the error it is fixing, and at trim
+speed it will hunt. One count of honest residual beats one count of
+oscillation — which makes the resolution of this system one reed count plus
+coast. If that is coarser than yaw needs, the fix is a longer moment arm on the
+linkage, not software.
+
+Set `MOTOR_DRIVER` in `Config.h` — L298N (default) or HW-039. Everything
+tunable lives in that file; constants marked PLACEHOLDER have not been measured
+yet. The `n` command re-runs the reed noise floor with the bridge powered and in
+circuit, which is the configuration `reed_switch_test/` could never test.
+
+The status line and the `s` / `h` / `c` / `g` / `k` / bare-Enter commands match
+what `host/link.py` already speaks, so the host code can point at v1 unchanged.
 
 ### `host/`
 
@@ -111,27 +145,25 @@ current internally at both extremes. So "we reached the end" is inferred from
 pulses stopping while motion is still commanded — the same signature as a jam,
 which is why every stall stops the motor immediately.
 
+**The cams have been confirmed to cut on the bench.** That matters more than it
+sounds: the whole end-of-travel inference above was being taken on faith, and
+homing drives deliberately into a stop expecting something to cut current
+before the winding does. It also means a run into an end is a normal ending
+rather than a stall against a mechanical stop.
+
+What it does *not* establish is where they cut, or whether they cut in the same
+place twice — see the open issue below.
+
 ## Configuration
 
-Everything tunable lives in `actuator_system/ActuatorConfig.h`. That is the
-only file that should need editing for a hardware change.
+Everything tunable lives in `actuator_v1/Config.h` — pins, speeds, tolerances,
+timeouts. That is the only file that should need editing for a hardware change.
+**Check `MOTOR_DRIVER` matches the module that is actually wired up** before the
+first run; it defaults to `DRV_L298N`.
 
-`SIMULATE_ACTUATOR` defaults to `1`. **Set it to `0` before connecting a real
-actuator.**
-
-## Simulator
-
-With `SIMULATE_ACTUATOR 1`, a virtual carriage responds to whatever the driver
-layer commands and feeds back reed pulses, stopping at its ends exactly the way
-the real cam switches do. One jumper from pin 6 to pin 2 routes the fake pulses
-through the real interrupt and the real debounce filter.
-
-The `q` command reports true position against believed position — the one thing
-the real bench can never show you. `j` jams the carriage, `n` injects noise
-pulses, `p` moves it with no pulses at all.
-
-Simulation passing is necessary, not sufficient. It says nothing about current
-draw, real pulse timing, wiring, or EMI.
+Constants marked PLACEHOLDER are guesses awaiting bench numbers. `COAST_SETTLE_MS`
+is the load-bearing one: set too short, every move is judged before the carriage
+has finished moving and the landing reports lie to you.
 
 ## Known open issues
 
@@ -139,23 +171,31 @@ draw, real pulse timing, wiring, or EMI.
   build machine. `test_geometry.py` was written alongside the math but has not
   been run, so treat the pointing angles as unchecked until it passes.
 - **End-stop repeatability has never been measured, and nothing here measures
-  it any more.** `cam_switch_test/` and `actuator_sensor_bench_test/` were
-  deleted in favour of the two sketches above. Homing calls the retract stop
-  zero, so if that stop lands somewhere different each time, the whole
-  coordinate system moves with it — recover those sketches from git history
-  before trusting an absolute position.
+  it any more.** The cams are now known to cut, which is what makes homing
+  viable at all — but a cam that cuts reliably and a cam that cuts in the *same
+  place* every time are different claims, and only the first has been checked.
+  Homing calls the retract stop zero, so if that stop lands a few counts
+  different each time, the whole coordinate system moves with it and every
+  absolute target inherits the error. `cam_switch_test/` measured exactly this
+  and was deleted; recover it from git history, or add a repeat-home command to
+  `actuator_v1/` (it has no such command yet), before trusting an absolute
+  position.
 - Yaw resolution is unknown until `mm_per_count` is measured. One reed count is
   the floor on pointing accuracy; if it turns out coarser than the link needs,
   the fix is a longer moment arm on the linkage, not software. The sketch that
   computed it went with the deletion above.
 - Reed noise rejection is debounce-only, and the noise floor has only been
   measured with no bridge in the circuit — which is the one configuration where
-  a clean result proves nothing. Re-run `n` once the HW-039 is switching amps
-  near the sensor run. If pickup appears, the fix is 4.7k pull-up to 5V, 220R
-  in series with the reed, 220nF to ground at the pin, and a shared ground that
-  does not carry motor return current.
-- `zeroHere()` keeps the learned travel figure after moving the origin, so the
-  soft limits no longer line up with the mechanical stops.
-- `jog()` returns void, so the console reports a jog it may have ignored.
-- Console argument parsing accepts garbage as `0`.
-- No off-target tests for the state machine.
+  a clean result proves nothing. `actuator_v1/` carries the test over as `n` so
+  it can be re-run with the driver powered; do that before trusting any move. If
+  pickup appears, the fix is 4.7k pull-up to 5V, 220R in series with the reed,
+  220nF to ground at the pin, and a shared ground that does not carry motor
+  return current.
+- **Coast has never been measured**, so `COAST_SETTLE_MS` is a guess. Set too
+  short, every move is judged before the carriage has finished moving and the
+  landing report lies. It is the first constant to nail down on the bench.
+- No off-target tests for the state machine, and no simulator any more, so
+  there is currently no way to exercise it without hardware.
+- `h` discards the calibrated travel figure, though it re-establishes the same
+  origin `c` used. Home and calibrate should share the span; only `z` should
+  drop it. Two-line fix, not yet applied.

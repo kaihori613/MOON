@@ -34,7 +34,7 @@
     3. Drive it at full speed. Type  s  for the report.
     4. If rejects appear, use  d <us>  to try a different debounce without
        reflashing, then re-run. Copy the value you settle on into
-       ActuatorConfig.h as REED_DEBOUNCE_US.
+       actuator_v1/Config.h as REED_DEBOUNCE_US.
 */
 
 const uint8_t REED_PIN = 2;      // must be interrupt-capable (D2/D3 on Uno)
@@ -284,7 +284,7 @@ void printReport() {
     Serial.println(F("    counts never come back."));
   }
 
-  Serial.println(F("  -- copy into ActuatorConfig.h --"));
+  Serial.println(F("  -- copy into actuator_v1/Config.h --"));
   Serial.print(F("  REED_DEBOUNCE_US  = ")); Serial.println(g_debounceUs);
   Serial.println(F("--------------------------------------------------------"));
   Serial.println();

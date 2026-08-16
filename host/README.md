@@ -108,7 +108,7 @@ Useful flags:
 | flag | effect |
 |---|---|
 | `--dry-run` | compute and print the pointing, touch no hardware |
-| `--home` | re-home even if the controller restored a position from EEPROM |
+| `--home` | re-home even if the controller thinks it already knows where it is |
 | `--no-auto` | skip the automatic cycle, go straight to manual tuning |
 | `-v` | echo every serial line, for when the link misbehaves |
 
@@ -139,14 +139,10 @@ queueing up a pile of moves and overshooting.
 
 ## Testing it with no actuator
 
-`SIMULATE_ACTUATOR` is `1` in `ActuatorConfig.h`, so the whole thing can be
-exercised end to end with nothing but an Arduino and one jumper from pin 6 to
-pin 2. Homing, seeking, stall detection, and every key in the tuning console
-behave exactly as they will with a motor attached.
-
-What that proves: the protocol parsing, the trim arithmetic, the state
-handling, and the keyboard handling. What it says nothing about: whether the
-linkage numbers are right, or where the dish is actually pointing.
+There is no simulator any more — it belonged to `actuator_system/`, which was
+deleted in favour of `actuator_v1/`. So the serial side currently cannot be
+exercised without a real Arduino and a real actuator. (The old simulator is
+recoverable from git history if that becomes painful.)
 
 The pointing math has its own test, which needs no hardware at all:
 

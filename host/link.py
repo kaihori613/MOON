@@ -1,7 +1,7 @@
 """
 link.py
 -------
-Serial transport to the actuator_system sketch.
+Serial transport to the actuator_v1 sketch.
 
 This deliberately speaks the console protocol that already exists rather than
 inventing a binary one. Everything this module sends, you could have typed by
@@ -9,7 +9,7 @@ hand into the Serial Monitor -- which means when something misbehaves you can
 unplug the script, open the monitor, and drive the same commands yourself to
 see whether the problem is up here or down there.
 
-Commands used (see actuator_system.ino):
+Commands used (see actuator_v1.ino):
     s        status
     h        home
     c        calibrate
