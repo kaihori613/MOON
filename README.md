@@ -8,11 +8,12 @@ the actuator's internal reed-switch position sensor.
 **The sensor has been measured and the motor has been driven — but never both
 at once.** Everything that closes the loop between them is still unvalidated,
 and the timing constants stay placeholders until the bench measurements
-replace them.
+replace them. `reed_switch_test/` now drives and counts in the same run, which
+is the first sketch here that does; that part has not been on hardware yet.
 
 | Component | State |
 |---|---|
-| `reed_switch_test/` | **Run on hardware.** Sensor is clean — see below |
+| `reed_switch_test/` | **Run on hardware, sensor is clean.** The timed run added since is unrun |
 | `l298n_test/`, `actuator_test/` | **Bring-up. The motor turned.** Superseded by `actuator_v1/` |
 | `actuator_v1/` | **Compiles clean, 63% flash / 17% RAM on a 328P. Never run.** |
 | Host yaw pointing | Written, never executed — no Python on the build machine yet |
@@ -33,16 +34,36 @@ yaw needs tighter pointing than pitch, so pitch stays set by hand.
 
 ### `reed_switch_test/`
 
-Is the sensor clean? One pulse per magnet pass, or more? The interrupt records
-every falling edge and rejects nothing; debounce is applied afterwards in
-`loop()`, so the report can show what it *would* have discarded. A sensor that
-needs heavy filtering to look clean is one about to lose counts at speed, and a
-sketch that hides its rejects will never show you that. Prints a gap histogram,
-tunes the debounce live with `d`, and measures the noise floor with the
-actuator stopped, where every edge is electrical pickup.
+Two questions, in order. **Is the sensor clean** — one pulse per magnet pass,
+or more? The interrupt records every falling edge and rejects nothing; debounce
+is applied afterwards in `loop()`, so the report can show what it *would* have
+discarded. A sensor that needs heavy filtering to look clean is one about to
+lose counts at speed, and a sketch that hides its rejects will never show you
+that. Prints a gap histogram, tunes the debounce live with `d`, and measures
+the noise floor with the actuator stopped, where every edge is electrical
+pickup.
 
-Wiring: reed switch to **D2** and **GND**, nothing else. The motor runs from
-the bench supply; this sketch does not drive it.
+**And how far is one pulse?** `e 10000` drives extend for ten seconds, counts
+the pulses that arrive while it does, and stops; you then measure how far the
+rod moved and type `m 47.5`. Distance over pulses is mm per count — a property
+of the mechanism, true at any duty — and distance over time is mm per second,
+true only at the duty that run used. That first number is the floor on pointing
+resolution and the one measurement nothing in this repo could produce.
+
+The run stops itself if the pulses stop while the motor is still commanded on,
+which is an internal cam cutting at the end of travel, and says so: the count
+and the distance still agree, but the rod stopped before the window did. It
+keeps counting for 400 ms after the current is cut, because the carriage does
+not stop when the current does and that coast is part of the distance you are
+about to measure. Per-pulse printing is suppressed for the duration — the
+serial writes are what would overflow the ring buffer and cost the count.
+
+Wiring: reed switch to **D2** and **GND**, plus the bridge — L298N on
+**D9/D6/D5**, HW-039 on **D9/D10/D8**, set by `MOTOR_DRIVER`. The bridge is
+held hard off except during a timed run, and claimed low in `setup()` before
+the serial handshake: unconfigured driver inputs are floating inputs, and an
+L298N will happily decide for itself what that means during a noise-floor test
+whose whole premise is that the carriage is stationary.
 
 **Result on the real actuator:** two cleanly separated populations — 636 bounce
 edges all under 0.2 ms, 176 real pulses no faster than 50 ms apart, and nothing
@@ -79,9 +100,10 @@ suspect. Two deliberate departures:
 It also drives **D8**, so it runs unchanged whether the enables are tied to +5V
 or landed on a pin.
 
-Reed pulses are counted and reported per run but nothing acts on them. A run
-that moves the rod while reporting zero pulses says the driver is fine and the
-sensor is the next problem.
+Nothing here reads the reed — the pin is not even claimed. What this sketch
+measures is time, which is enough for breakaway duty, stroke duration each way
+and coast after stop, and none of which needs the sensor. Pulses against
+distance is `reed_switch_test/`'s job.
 
 ### `actuator_v1/`
 
@@ -221,8 +243,9 @@ has finished moving and the landing reports lie to you.
   position.
 - Yaw resolution is unknown until `mm_per_count` is measured. One reed count is
   the floor on pointing accuracy; if it turns out coarser than the link needs,
-  the fix is a longer moment arm on the linkage, not software. The sketch that
-  computed it went with the deletion above.
+  the fix is a longer moment arm on the linkage, not software. `reed_switch_test/`
+  measures it now — timed run, count the pulses, measure the rod, `m <mm>` —
+  but that has not been done yet.
 - Reed noise rejection is debounce-only, and the noise floor has only been
   measured with no bridge in the circuit — which is the one configuration where
   a clean result proves nothing. `actuator_v1/` carries the test over as `n` so

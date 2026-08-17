@@ -1,11 +1,28 @@
 /*
-  Reed Switch Test  --  is the position sensor trustworthy?
-  ---------------------------------------------------------
-  One question only: does the reed switch produce exactly one clean pulse per
-  magnet pass? Nothing here cares about strokes, ends of travel, or how far the
-  actuator went. Run this first. If the sensor lies, every number produced by
-  every other sketch in this repo is built on sand -- position is integrated
-  from these pulses and never corrected.
+  Reed Switch Test  --  is the sensor trustworthy, and how far is one pulse?
+  --------------------------------------------------------------------------
+  Two questions, in that order:
+
+    1. Does the reed produce exactly one clean pulse per magnet pass?
+    2. How many millimetres of rod is one pulse worth?
+
+  The first has to be settled before the second is worth asking, because a
+  sensor that double-counts gives a mm-per-pulse figure that is exactly half
+  the truth and looks perfectly reasonable. Answer 1 with the histogram and
+  the noise floor, then answer 2 with a timed run.
+
+  THE TIMED RUN, WHICH IS THE NEW PART
+    'e 10000' drives extend for ten seconds, counts the pulses that arrive
+    while it does, and stops. Then you measure the rod with a rule or calipers
+    -- the distance it MOVED, not its overall length -- and type  m <mm>. That
+    is the whole calibration: distance over pulses is mm per pulse, and it is a
+    property of the mechanism that does not change with duty or direction.
+    Distance over time is mm per second, which does change with both, and is
+    only ever true for the duty the run used.
+
+    This is the number the repo has been missing. One reed count is the floor
+    on pointing resolution, and until mm-per-count is known there is no way to
+    say whether that floor is finer or coarser than the link needs.
 
   HOW THIS DIFFERS FROM THE OTHER SKETCHES
     The debounce filter here does NOT throw pulses away silently. The interrupt
@@ -25,37 +42,60 @@
     software, so the pin reads HIGH when open, LOW when the magnet closes the
     contact.
 
-  THE DRIVER IS HELD OFF, NOT IGNORED
-    This sketch still does not drive the motor. But leaving the driver's input
-    pins unconfigured is not the same as leaving them alone: after a reset they
-    are high-impedance inputs, and an L298N's ENA floating high with IN1 and
-    IN2 at different levels will run the motor. During a test whose entire
-    premise is that the carriage is stationary, that is the worst possible
-    failure -- it corrupts the measurement and drives the actuator unattended.
+    L298N:  ENA -> D9, IN1 -> D6, IN2 -> D5.  ENA jumper OFF or the speed does
+            nothing. 5V_EN jumper OFF at 24 V or the onboard regulator cooks.
+    HW-039: RPWM -> D9, LPWM -> D10, R_EN/L_EN -> D8 or +5V.
 
-    So setup() claims those pins and drives them low before anything else.
-    The bridge can then be powered, which is the whole point: the original
-    clean result on this sensor was measured with no bridge in the circuit,
-    and that is the one configuration where a clean result proves nothing.
+    GND of the Arduino to the motor supply negative, and keep the reed's return
+    off that same wire if you can -- motor return current down a shared ground
+    is where pickup comes from.
+
+  THE DRIVER IS OFF UNTIL YOU ASK FOR A RUN
+    Everything except a timed run holds the bridge hard off, and setup() claims
+    those pins and drives them low before anything that can block. Leaving them
+    unconfigured is not the same as leaving them alone: after a reset they are
+    high-impedance inputs, and an L298N's ENA floating high with IN1 and IN2 at
+    different levels will run the motor. During the noise floor test, whose
+    entire premise is that the carriage is stationary, that is the worst
+    possible failure -- it corrupts the measurement and drives the actuator
+    unattended.
+
+    Powering the bridge is the point rather than a risk: the original clean
+    result on this sensor was measured with no bridge in the circuit, and that
+    is the one configuration where a clean result proves nothing.
+
+  THE THING TO BE CAREFUL ABOUT
+    Ten seconds of travel may be more stroke than the actuator has left. What
+    normally stops it is a cam limit switch cutting current inside the actuator
+    -- and when that happens the pulses stop while the motor is still commanded
+    on, which this sketch detects and reports as an early end. That is a normal
+    ending, not a fault, but the run is then shorter than you asked for. Read
+    the time it actually ran, not the time you asked for, and if it ended early
+    reverse a few seconds and run again from somewhere with room.
+
+    Current limit on the supply, 3-5 A, and watch the ammeter.
 
   PROCEDURE
     1. Driver POWERED, motor connected, carriage stationary. Type  n  for the
        noise-floor test. Anything above zero is electrical pickup, not motion,
        and it will corrupt position forever once the bridge starts switching.
-    2. Drive the actuator SLOWLY from the bench supply. Watch the pulses print.
-       Slow travel is where double-counting is easiest to see.
-    3. Drive it at full speed. Type  s  for the report.
-    4. If rejects appear, use  d <us>  to try a different debounce without
-       reflashing, then re-run. Copy the value you settle on into
-       actuator_v1/Config.h as REED_DEBOUNCE_US.
+    2. Type  v  to see individual pulses, then  e 2000  and watch them arrive.
+       Slow travel is where double-counting is easiest to see; 'w 90' first if
+       you want it slower still.
+    3. Type  s  for the sensor report. If rejects appear, use  d <us>  to try a
+       different debounce without reflashing, then  z  and re-run. Copy the
+       value you settle on into actuator_v1/Config.h as REED_DEBOUNCE_US.
+    4. Only once that is clean: mark the rod, run  e 10000  or  r 10000  from a
+       position with room to move, measure the travel, and type  m <mm>.
+       Repeat both directions. They should agree.
 */
 
 const uint8_t REED_PIN = 2;      // must be interrupt-capable (D2/D3 on Uno)
 
-// --- The motor driver, which this sketch holds OFF -------------------------
-//  Same selection as actuator_v1/Config.h. Nothing here ever drives the motor;
-//  these pins exist only so they can be claimed and pulled low, instead of
-//  being left floating where the bridge decides for itself what to do.
+// --- The motor driver -------------------------------------------------------
+//  Same selection, same pins and same ordering as actuator_v1/Config.h. The
+//  bridge is off except during a timed run, and claimed low in setup() before
+//  anything that can block, rather than left floating for it to decide.
 
 #define DRV_L298N  1
 #define DRV_HW039  2
@@ -74,30 +114,90 @@ const uint8_t REED_PIN = 2;      // must be interrupt-capable (D2/D3 on Uno)
   #error "Set MOTOR_DRIVER to DRV_L298N or DRV_HW039"
 #endif
 
-// Called first thing in setup(), before anything that can block. With the
-// L298N, ENA low disables the output stage outright; IN1 and IN2 equal is
-// coast, so even a failed ENA cannot produce rotation.
-void holdDriverOff() {
+// With the L298N, ENA low disables the output stage outright; IN1 and IN2
+// equal is coast, so even a failed ENA cannot produce rotation. With the
+// HW-039 the two PWM inputs are the whole of the off switch, which is why
+// both go low by digitalWrite rather than analogWrite(0).
+void motorOff() {
 #if MOTOR_DRIVER == DRV_L298N
-  pinMode(PIN_ENA, OUTPUT);
-  pinMode(PIN_IN1, OUTPUT);
-  pinMode(PIN_IN2, OUTPUT);
+  analogWrite(PIN_ENA, 0);
   digitalWrite(PIN_ENA, LOW);
   digitalWrite(PIN_IN1, LOW);
   digitalWrite(PIN_IN2, LOW);
 #else
-  pinMode(PIN_RPWM, OUTPUT);
-  pinMode(PIN_LPWM, OUTPUT);
-  pinMode(PIN_EN,   OUTPUT);
   digitalWrite(PIN_RPWM, LOW);
   digitalWrite(PIN_LPWM, LOW);
   digitalWrite(PIN_EN,   LOW);
 #endif
 }
 
+void motorPins() {
+#if MOTOR_DRIVER == DRV_L298N
+  pinMode(PIN_ENA, OUTPUT);
+  pinMode(PIN_IN1, OUTPUT);
+  pinMode(PIN_IN2, OUTPUT);
+#else
+  pinMode(PIN_RPWM, OUTPUT);
+  pinMode(PIN_LPWM, OUTPUT);
+  pinMode(PIN_EN,   OUTPUT);
+#endif
+  motorOff();
+}
+
+// Direction is set while the output stage is off, then speed. On the HW-039
+// the idle side goes hard off before the driven side goes anywhere near on:
+// with the enables tied high those two pins are the only thing standing
+// between the supply and a shoot-through.
+void motorApply(char dir, uint8_t speed) {
+#if MOTOR_DRIVER == DRV_L298N
+  digitalWrite(PIN_ENA, LOW);
+  digitalWrite(PIN_IN1, dir == 'e' ? HIGH : LOW);
+  digitalWrite(PIN_IN2, dir == 'e' ? LOW  : HIGH);
+  analogWrite(PIN_ENA, speed);
+#else
+  digitalWrite(dir == 'e' ? PIN_LPWM : PIN_RPWM, LOW);
+  digitalWrite(PIN_EN, HIGH);
+  analogWrite(dir == 'e' ? PIN_RPWM : PIN_LPWM, speed);
+#endif
+}
+
+// --- Timed run tuning -------------------------------------------------------
+
+const unsigned long RUN_MS_DEFAULT = 10000;   // bare 'e' / 'r'
+const unsigned long RUN_MS_MIN     = 200;
+const unsigned long RUN_MS_MAX     = 30000;   // MAX_RUN_MS in Config.h
+
+const uint8_t SPEED_DEFAULT = 180;            // SPEED_RUN in Config.h
+const uint8_t SPEED_FLOOR   = 60;             // below this it buzzes, not moves
+
+// Motor commanded on but no pulse for this long: the actuator has either hit
+// an internal cam limit switch or it is jammed, and nothing out here can tell
+// those apart. Either way the run is over. Matches Config.h.
+const uint16_t RUN_STALL_MS = 700;
+
+// Grace from motor-on to the first pulse, for breakaway.
+const uint16_t RUN_GRACE_MS = 900;
+
+// The carriage does not stop when the current does. Pulses that arrive while
+// it coasts are real travel and are part of the distance about to be measured,
+// so keep counting through this window before reporting anything.
+const uint16_t RUN_COAST_MS = 400;
+
+// Magnet passes per revolution of the sensed shaft. One magnet on the motor
+// shaft is the usual arrangement, in which case a pulse is a cycle and this is
+// 1. If yours carries more, set the real number and the report will divide.
+const uint8_t PULSES_PER_CYCLE = 1;
+
+const uint16_t RUN_TICK_MS = 1000;   // how often a run prints its progress
+
 // Live-adjustable with 'd', so you can find the right value on the bench
 // instead of reflashing between guesses.
 unsigned long g_debounceUs = 3000;
+
+// A gap longer than this spans a pause between two moves, not travel. Real
+// travel at the slowest usable duty is orders of magnitude faster; anything
+// this slow is the bench standing still.
+const unsigned long IDLE_GAP_US = 2000000UL;
 
 bool g_verbose = true;           // print every pulse as it arrives ('v')
 
@@ -347,6 +447,279 @@ void printReport() {
 }
 
 // ---------------------------------------------------------------------------
+//  Timed run
+// ---------------------------------------------------------------------------
+//  Drive for a fixed window, count what arrives, stop. The measurement is the
+//  pulse count against the distance you then measure by hand -- so anything
+//  that could cost a pulse costs the calibration too, which is why per-pulse
+//  printing is suppressed for the duration and buffer overflows are reported.
+
+uint8_t g_speed = SPEED_DEFAULT;
+
+bool          g_runActive   = false;   // includes the coast tail
+bool          g_runCoasting = false;   // motor already cut, still counting
+bool          g_runStalled  = false;   // pulses stopped while still commanded
+char          g_runDir      = 'e';
+unsigned long g_runWindowMs = 0;       // what was asked for
+unsigned long g_runStartMs  = 0;
+unsigned long g_runStopMs   = 0;       // when the motor was cut
+unsigned long g_runNextTick = 0;
+
+unsigned long g_runPulses      = 0;
+unsigned long g_runCoastPulses = 0;
+unsigned long g_runRejects     = 0;
+unsigned long g_runOverflowAt  = 0;    // overflow count when the run started
+unsigned long g_lastAcceptMs   = 0;
+
+const __FlashStringHelper* g_runWhy = nullptr;
+
+// The last completed run, kept so 'm' has something to divide by.
+bool          g_haveRun     = false;
+unsigned long g_lastPulses  = 0;
+unsigned long g_lastRanMs   = 0;
+uint8_t       g_lastSpeed   = 0;
+char          g_lastDir     = 'e';
+bool          g_lastEndedEarly = false;
+
+void startRun(char dir, unsigned long windowMs) {
+  if (g_runActive) {
+    Serial.println(F("  already running -- 'x' stops it"));
+    return;
+  }
+  if (g_speed < SPEED_FLOOR) {
+    Serial.println(F("  duty is below the floor -- 'w <60-255>' first"));
+    return;
+  }
+
+  g_runDir      = dir;
+  g_runWindowMs = constrain(windowMs, RUN_MS_MIN, RUN_MS_MAX);
+  g_runPulses      = 0;
+  g_runCoastPulses = 0;
+  g_runRejects     = 0;
+  g_runCoasting = false;
+  g_runStalled  = false;
+  g_runWhy      = nullptr;
+
+  noInterrupts();
+  g_runOverflowAt = g_overflows;
+  interrupts();
+
+  Serial.println();
+  Serial.print(F("  RUN  "));
+  Serial.print(dir == 'e' ? F("EXTEND") : F("RETRACT"));
+  Serial.print(F("  duty ")); Serial.print(g_speed);
+  Serial.print(F("  for ")); Serial.print(g_runWindowMs / 1000.0, 2);
+  Serial.println(F(" s   ('x' stops)"));
+  if (g_verbose) {
+    Serial.println(F("  (per-pulse printing is held off while it runs -- the"));
+    Serial.println(F("   serial writes are what would lose the count)"));
+  }
+
+  g_runActive  = true;
+  g_runStartMs = millis();
+  g_runNextTick = g_runStartMs + RUN_TICK_MS;
+  motorApply(dir, g_speed);
+}
+
+// Cut the motor but stay in the run: the carriage is still moving and those
+// pulses belong to the distance being measured.
+void endDrive(const __FlashStringHelper* why) {
+  motorOff();
+  g_runStopMs   = millis();
+  g_runCoasting = true;
+  g_runWhy      = why;
+
+  Serial.print(F("  motor off ("));
+  Serial.print(why);
+  Serial.println(F(") -- counting the coast"));
+}
+
+void printRunReport() {
+  const unsigned long ranMs = g_runStopMs - g_runStartMs;
+
+  Serial.println();
+  Serial.println(F("--- timed run ------------------------------------------"));
+  Serial.print(F("  direction     : "));
+  Serial.print(g_runDir == 'e' ? F("EXTEND") : F("RETRACT"));
+  Serial.print(F("        duty ")); Serial.println(g_speed);
+  Serial.print(F("  asked for     : ")); Serial.print(g_runWindowMs / 1000.0, 2);
+  Serial.println(F(" s"));
+  Serial.print(F("  ran           : ")); Serial.print(ranMs / 1000.0, 2);
+  Serial.print(F(" s   (")); Serial.print(g_runWhy); Serial.println(F(")"));
+
+  Serial.print(F("  pulses        : ")); Serial.print(g_runPulses);
+  if (g_runCoastPulses > 0) {
+    Serial.print(F("   (")); Serial.print(g_runCoastPulses);
+    Serial.print(F(" of them after the motor was cut)"));
+  }
+  Serial.println();
+
+  if (PULSES_PER_CYCLE > 1) {
+    Serial.print(F("  cycles        : "));
+    Serial.print(g_runPulses / (float)PULSES_PER_CYCLE, 2);
+    Serial.print(F("   (at ")); Serial.print(PULSES_PER_CYCLE);
+    Serial.println(F(" magnets per revolution)"));
+  }
+
+  Serial.print(F("  rejected      : ")); Serial.println(g_runRejects);
+
+  if (g_runPulses >= 2 && ranMs > 0) {
+    Serial.print(F("  rate          : "));
+    Serial.print((g_runPulses * 1000.0) / ranMs, 2);
+    Serial.print(F(" pulses/s   mean gap "));
+    Serial.print(ranMs / (float)g_runPulses, 1);
+    Serial.println(F(" ms"));
+  }
+
+  noInterrupts();
+  const unsigned long overflowed = g_overflows - g_runOverflowAt;
+  interrupts();
+  if (overflowed > 0) {
+    Serial.print(F("  ! edges lost to buffer overflow: "));
+    Serial.println(overflowed);
+    Serial.println(F("    The count above is short by at least that much and"));
+    Serial.println(F("    must not be calibrated against. Turn per-pulse"));
+    Serial.println(F("    printing off with 'v' and run it again."));
+  }
+
+  if (g_runStalled) {
+    Serial.println();
+    Serial.println(F("  Ended early: the pulses stopped while the motor was"));
+    Serial.println(F("  still commanded on. Almost certainly an internal cam"));
+    Serial.println(F("  cutting at the end of travel, which is a normal ending"));
+    Serial.println(F("  -- but the rod stopped moving before the window did."));
+    Serial.println(F("  The count and the distance still agree with each other,"));
+    Serial.println(F("  so this run is fine to measure. The mm/s figure below"));
+    Serial.println(F("  will be right and the time will not mean what you asked."));
+  }
+
+  if (g_runPulses == 0) {
+    Serial.println();
+    Serial.println(F("  No pulses at all. If the rod moved, the sensor or its"));
+    Serial.println(F("  wiring is the problem, not the bridge -- 'p' reads the"));
+    Serial.println(F("  pin level directly. If it did not move, raise the duty"));
+    Serial.println(F("  with 'w' and check the supply is not current limiting."));
+    Serial.println(F("--------------------------------------------------------"));
+    return;
+  }
+
+  Serial.println();
+  Serial.println(F("  Measure how far the rod MOVED -- not its total length --"));
+  Serial.println(F("  and type   m <mm>"));
+  Serial.println(F("--------------------------------------------------------"));
+}
+
+void finishRun() {
+  g_runActive   = false;
+  g_runCoasting = false;
+
+  printRunReport();
+
+  if (g_runPulses > 0) {
+    g_haveRun    = true;
+    g_lastPulses = g_runPulses;
+    g_lastRanMs  = g_runStopMs - g_runStartMs;
+    g_lastSpeed  = g_speed;
+    g_lastDir    = g_runDir;
+    g_lastEndedEarly = g_runStalled;
+  }
+}
+
+void serviceRun() {
+  if (!g_runActive) return;
+
+  const unsigned long now = millis();
+
+  if (g_runCoasting) {
+    if (now - g_runStopMs >= RUN_COAST_MS) finishRun();
+    return;
+  }
+
+  if (now - g_runStartMs >= g_runWindowMs) {
+    endDrive(F("window elapsed"));
+    return;
+  }
+
+  // Pulses stopping while the motor is still on is the end of travel or a jam,
+  // and out here those look identical. Both want the current off now.
+  const unsigned long since = now - (g_runPulses ? g_lastAcceptMs : g_runStartMs);
+  if (since >= (g_runPulses ? RUN_STALL_MS : RUN_GRACE_MS)) {
+    g_runStalled = true;
+    endDrive(g_runPulses ? F("pulses stopped -- end of travel, or jammed")
+                         : F("never broke away -- no pulse at all"));
+    return;
+  }
+
+  if (now >= g_runNextTick) {
+    g_runNextTick += RUN_TICK_MS;
+    Serial.print(F("    "));
+    Serial.print((now - g_runStartMs) / 1000.0, 1);
+    Serial.print(F(" s   "));
+    Serial.print(g_runPulses);
+    Serial.println(F(" pulses"));
+  }
+}
+
+// The calibration itself. Distance over pulses is a property of the mechanism;
+// distance over time is a property of this duty and nothing else.
+void measuredDistance(float mm) {
+  if (!g_haveRun) {
+    Serial.println(F("  no run to measure -- 'e' or 'r' first"));
+    return;
+  }
+  if (mm <= 0.0f) {
+    Serial.println(F("  give the distance travelled in mm, as a positive"));
+    Serial.println(F("  number -- direction is already known from the run"));
+    return;
+  }
+
+  const float mmPerPulse = mm / g_lastPulses;
+
+  Serial.println();
+  Serial.println(F("--- distance calibration -------------------------------"));
+  Serial.print(F("  measured      : ")); Serial.print(mm, 2);
+  Serial.print(F(" mm over ")); Serial.print(g_lastPulses);
+  Serial.print(F(" pulses "));
+  Serial.println(g_lastDir == 'e' ? F("extending") : F("retracting"));
+
+  Serial.print(F("  mm per pulse  : ")); Serial.println(mmPerPulse, 4);
+  Serial.print(F("  pulses per mm : ")); Serial.println(1.0f / mmPerPulse, 3);
+  if (PULSES_PER_CYCLE > 1) {
+    Serial.print(F("  mm per cycle  : "));
+    Serial.println(mmPerPulse * PULSES_PER_CYCLE, 4);
+  }
+
+  Serial.print(F("  travel rate   : "));
+  Serial.print((mm * 1000.0f) / g_lastRanMs, 2);
+  Serial.print(F(" mm/s at duty ")); Serial.println(g_lastSpeed);
+
+  Serial.println();
+  Serial.println(F("  mm/pulse is the mechanism and holds at any duty. mm/s is"));
+  Serial.println(F("  this duty only, and both ends of the stroke will be"));
+  Serial.println(F("  slower than the middle under load."));
+
+  // One pulse is the smallest move the controller can distinguish, so it is
+  // also the floor on pointing -- which is the whole reason this number was
+  // wanted. Quantisation is +/-1 pulse, so a short run inflates the error.
+  Serial.print(F("  resolution    : one count = "));
+  Serial.print(mmPerPulse, 4);
+  Serial.println(F(" mm of rod"));
+  Serial.print(F("  this run is +/-1 pulse, so +/-"));
+  Serial.print((100.0f / g_lastPulses), 1);
+  Serial.println(F("% on the figure above."));
+  if (g_lastPulses < 50) {
+    Serial.println(F("  Run longer for a tighter number -- the error is one"));
+    Serial.println(F("  pulse however far it went."));
+  }
+  if (g_lastEndedEarly) {
+    Serial.println(F("  That run ended early against a stop. Fine for mm/pulse,"));
+    Serial.println(F("  but the rod was slowing into the cam, so mm/s is low."));
+  }
+  Serial.println(F("--------------------------------------------------------"));
+  Serial.println();
+}
+
+// ---------------------------------------------------------------------------
 //  Noise floor
 // ---------------------------------------------------------------------------
 //  With the actuator stationary, every edge is electrical. This is the single
@@ -398,7 +771,12 @@ void noiseFloorTest() {
 void printHelp() {
   Serial.println(F("--- commands -------------------------------------------"));
   Serial.println(F("  ?        this help"));
-  Serial.println(F("  s        report"));
+  Serial.println(F("  e [ms]   run EXTEND  for ms and count pulses (10000)"));
+  Serial.println(F("  r [ms]   run RETRACT for ms and count pulses (10000)"));
+  Serial.println(F("  x        stop the run now"));
+  Serial.println(F("  w <n>    PWM duty, 60-255"));
+  Serial.println(F("  m <mm>   distance the rod moved on the last run"));
+  Serial.println(F("  s        sensor report"));
   Serial.println(F("  z        zero all statistics"));
   Serial.println(F("  d <us>   set the debounce window (no reflash needed)"));
   Serial.println(F("  n        noise floor test -- actuator must be STOPPED"));
@@ -416,9 +794,51 @@ void handleCommand(char* line) {
   const bool hasArg = (*arg != '\0');
   const long argVal = hasArg ? strtol(arg, nullptr, 10) : 0;
 
+  // Anything that would move the goalposts under a run in progress: the count
+  // and the distance have to describe the same stretch of travel or the
+  // calibration is meaningless.
+  if (g_runActive && (cmd == 'z' || cmd == 'd' || cmd == 'n')) {
+    Serial.println(F("  not while a run is going -- 'x' stops it"));
+    return;
+  }
+
   switch (cmd) {
     case '?': printHelp(); break;
     case 's': printReport(); break;
+
+    case 'e':
+    case 'r':
+      startRun(cmd, hasArg ? (unsigned long)argVal : RUN_MS_DEFAULT);
+      break;
+
+    case 'x':
+      if (g_runActive && !g_runCoasting) {
+        endDrive(F("stopped by hand"));
+      } else if (g_runActive) {
+        Serial.println(F("  motor is already off -- letting the coast finish"));
+      } else {
+        motorOff();               // belt and braces, costs nothing
+        Serial.println(F("  already stopped"));
+      }
+      break;
+
+    case 'w':
+      if (!hasArg) {
+        Serial.print(F("duty = ")); Serial.println(g_speed);
+        break;
+      }
+      g_speed = (uint8_t)constrain(argVal, 0L, 255L);
+      Serial.print(F("duty = ")); Serial.println(g_speed);
+      if (g_speed < SPEED_FLOOR) {
+        Serial.println(F("  below the floor -- it will buzz without moving"));
+      }
+      if (g_runActive && !g_runCoasting) {
+        Serial.println(F("  applies to the NEXT run, not this one -- changing"));
+        Serial.println(F("  speed mid-run would make mm/s mean nothing"));
+      }
+      break;
+
+    case 'm': measuredDistance(hasArg ? atof(arg) : 0.0f); break;
 
     case 'z':
       zeroStats();
@@ -487,7 +907,7 @@ void pollSerial() {
 void setup() {
   // Before the serial handshake, which can block: an unconfigured driver input
   // is an input, and an L298N gets to decide for itself what that means.
-  holdDriverOff();
+  motorPins();
 
   Serial.begin(115200);
   while (!Serial) { ; }
@@ -498,23 +918,28 @@ void setup() {
   zeroStats();
 
   Serial.println();
-  Serial.println(F("=== Reed Switch Test ==="));
-  Serial.print(F("Driver held OFF: "));
+  Serial.println(F("=== Reed Switch Test -- sensor, and mm per pulse ==="));
+  Serial.print(F("Driver: "));
 #if MOTOR_DRIVER == DRV_L298N
-  Serial.println(F("L298N, ENA D9 low, IN1 D6 and IN2 D5 low"));
+  Serial.println(F("L298N, ENA D9, IN1 D6, IN2 D5 -- all low until a run"));
 #else
-  Serial.println(F("HW-039, RPWM D9, LPWM D10, EN D8 all low"));
+  Serial.println(F("HW-039, RPWM D9, LPWM D10, EN D8 -- all low until a run"));
 #endif
-  Serial.println(F("Sensor only -- this sketch never turns the motor. Move the"));
-  Serial.println(F("carriage by hand, or from the bench supply direct."));
+  Serial.print(F("Duty ")); Serial.print(g_speed);
+  Serial.print(F(", debounce ")); Serial.print(g_debounceUs);
+  Serial.println(F(" us"));
   Serial.println();
-  Serial.println(F("POWER THE DRIVER for the noise floor test. Measuring it"));
+  Serial.println(F("POWER THE DRIVER before the noise floor test. Measuring it"));
   Serial.println(F("with the bridge out of circuit is the one configuration"));
   Serial.println(F("where a clean result proves nothing."));
   Serial.println();
-  Serial.println(F("Start with 'n' (noise floor, carriage still), then move the"));
-  Serial.println(F("carriage slowly and watch the pulses, then at full"));
-  Serial.println(F("speed, then 's' for the report."));
+  Serial.println(F("Order: 'n' with the carriage still, then a short 'e 2000'"));
+  Serial.println(F("to watch pulses arrive, then 's' for the sensor verdict."));
+  Serial.println(F("Only once that is clean is the calibration worth doing:"));
+  Serial.println(F("mark the rod, 'e 10000', measure the travel, 'm <mm>'."));
+  Serial.println();
+  Serial.println(F("Current limit the supply to 3-5 A. Ten seconds may be more"));
+  Serial.println(F("stroke than is left -- start from somewhere with room."));
   Serial.println();
   printHelp();
 }
@@ -533,11 +958,18 @@ void loop() {
     g_tail = (uint8_t)((g_tail + 1) % GAP_BUF);
     interrupts();
 
-    g_bucket[bucketOf(gap)]++;
+    // The first pulse of a move is separated from the last pulse of the
+    // previous one by however long the bench sat idle. The magnet did pass, so
+    // it counts -- but letting that gap into the histogram or the slowest-gap
+    // figure makes both describe the pause instead of the travel.
+    const bool travelGap = (gap < IDLE_GAP_US);
+
+    if (travelGap) g_bucket[bucketOf(gap)]++;
 
     if (gap < g_debounceUs) {
       g_rejected++;
-      if (g_verbose) {
+      if (g_runActive) g_runRejects++;
+      if (g_verbose && !g_runActive) {
         Serial.print(F("  reject   gap "));
         Serial.print(gap);
         Serial.println(F(" us  (under the debounce -- bounce or noise)"));
@@ -546,10 +978,21 @@ void loop() {
     }
 
     g_accepted++;
-    if (gap < g_minAcceptUs) g_minAcceptUs = gap;
-    if (gap > g_maxAcceptUs) g_maxAcceptUs = gap;
+    if (travelGap) {
+      if (gap < g_minAcceptUs) g_minAcceptUs = gap;
+      if (gap > g_maxAcceptUs) g_maxAcceptUs = gap;
+    }
 
-    if (g_verbose) {
+    if (g_runActive) {
+      g_runPulses++;
+      if (g_runCoasting) g_runCoastPulses++;
+      g_lastAcceptMs = millis();
+    }
+
+    // Serial writes during a run are what would overflow the ring and cost the
+    // count the whole measurement rests on, so the run prints once a second
+    // and nothing else.
+    if (g_verbose && !g_runActive) {
       Serial.print(F("Pulse #"));
       Serial.print(g_accepted);
       Serial.print(F("  gap "));
@@ -559,4 +1002,6 @@ void loop() {
       Serial.println(F(" Hz"));
     }
   }
+
+  serviceRun();
 }
