@@ -11,7 +11,7 @@
   the truth and looks perfectly reasonable. Answer 1 with the histogram and
   the noise floor, then answer 2 with a timed run.
 
-  THE TIMED RUN, WHICH IS THE NEW PART
+  RUNS BY TIME, AND RUNS BY COUNT
     'e 10000' drives extend for ten seconds, counts the pulses that arrive
     while it does, and stops. Then you measure the rod with a rule or calipers
     -- the distance it MOVED, not its overall length -- and type  m <mm>. That
@@ -23,6 +23,22 @@
     This is the number the repo has been missing. One reed count is the floor
     on pointing resolution, and until mm-per-count is known there is no way to
     say whether that floor is finer or coarser than the link needs.
+
+    '+50' and '-50' drive fifty COUNTS instead, and stop on the sensor rather
+    than on the clock. Ten seconds out and ten seconds back does not return the
+    rod to where it started -- the load is not symmetric, so the two directions
+    do not travel at the same rate, and that is exactly why nothing here is
+    positioned by stopwatch. Fifty counts out and fifty counts back should
+    return it, and what it misses by is backlash on its own, with the speed
+    difference taken out.
+
+    A count run also reports its OVERSHOOT, which is the most useful number on
+    this bench after mm-per-count. The motor is cut when the target arrives and
+    the carriage keeps going, so the overshoot is coast measured in the only
+    unit the controller can act on. It is the floor on where any move can land:
+    Config.h asks for a deadband of one count, and if the overshoot at a given
+    duty is larger than that, a move at that duty can never settle inside it.
+    Dropping the duty until the overshoot fits is how SPEED_TRIM gets found.
 
   HOW THIS DIFFERS FROM THE OTHER SKETCHES
     The debounce filter here does NOT throw pulses away silently. The interrupt
@@ -87,7 +103,12 @@
        value you settle on into actuator_v1/Config.h as REED_DEBOUNCE_US.
     4. Only once that is clean: mark the rod, run  e 10000  or  r 10000  from a
        position with room to move, measure the travel, and type  m <mm>.
-       Repeat both directions. They should agree.
+       Repeat both directions. mm per pulse should agree even though the
+       distances do not.
+    5. Coast and backlash, which want counts rather than time. From a mark,
+       '+50' then '-50'. Read the overshoot on each report -- that is coast --
+       and measure how far short of the mark it came back, which is backlash.
+       Then 'w 150', '+50', '-50' again: both numbers should shrink.
 */
 
 const uint8_t REED_PIN = 2;      // must be interrupt-capable (D2/D3 on Uno)
@@ -166,6 +187,11 @@ void motorApply(char dir, uint8_t speed) {
 const unsigned long RUN_MS_DEFAULT = 10000;   // bare 'e' / 'r'
 const unsigned long RUN_MS_MIN     = 200;
 const unsigned long RUN_MS_MAX     = 30000;   // MAX_RUN_MS in Config.h
+
+// A count run still gets the time backstop above: if the target is never
+// reached, something has to stop the motor, and out here nothing else will.
+const long RUN_COUNTS_DEFAULT = 1;            // bare '+' / '-', as in Config.h
+const long RUN_COUNTS_MAX     = 2000;
 
 const uint8_t SPEED_DEFAULT = 180;            // SPEED_RUN in Config.h
 const uint8_t SPEED_FLOOR   = 60;             // below this it buzzes, not moves
@@ -447,20 +473,38 @@ void printReport() {
 }
 
 // ---------------------------------------------------------------------------
-//  Timed run
+//  Runs
 // ---------------------------------------------------------------------------
-//  Drive for a fixed window, count what arrives, stop. The measurement is the
-//  pulse count against the distance you then measure by hand -- so anything
-//  that could cost a pulse costs the calibration too, which is why per-pulse
-//  printing is suppressed for the duration and buffer overflows are reported.
+//  Two ways to ask for travel, and the difference between them is the whole
+//  lesson of this bench:
+//
+//    'e 10000'  ten seconds of extend        -- time is the target
+//    '+50'      fifty pulses of extend       -- distance is the target
+//
+//  Ten seconds out and ten seconds back does NOT return the rod to where it
+//  started, because the two directions do not travel at the same rate under an
+//  asymmetric load. Fifty counts out and fifty counts back should -- and what
+//  it misses by is backlash, measured directly, with the speed asymmetry taken
+//  out of the picture. That is the pair of runs worth doing.
+//
+//  A count run also measures its own overshoot, which is coast expressed in the
+//  only unit the controller can act on. Config.h wants that number twice over:
+//  as COAST_SETTLE_MS, and as the duty at which overshoot finally fits inside
+//  DEADBAND_COUNTS -- which is what SPEED_TRIM is for.
+//
+//  Either way, anything that could cost a pulse costs the measurement, which is
+//  why per-pulse printing is suppressed for the duration and buffer overflows
+//  are reported as grounds to throw the run away.
 
 uint8_t g_speed = SPEED_DEFAULT;
 
 bool          g_runActive   = false;   // includes the coast tail
 bool          g_runCoasting = false;   // motor already cut, still counting
 bool          g_runStalled  = false;   // pulses stopped while still commanded
+bool          g_runByCounts = false;   // target is pulses, not milliseconds
 char          g_runDir      = 'e';
-unsigned long g_runWindowMs = 0;       // what was asked for
+unsigned long g_runWindowMs = 0;       // the backstop, and the target if timed
+unsigned long g_runTarget   = 0;       // pulses wanted, if g_runByCounts
 unsigned long g_runStartMs  = 0;
 unsigned long g_runStopMs   = 0;       // when the motor was cut
 unsigned long g_runNextTick = 0;
@@ -481,7 +525,7 @@ uint8_t       g_lastSpeed   = 0;
 char          g_lastDir     = 'e';
 bool          g_lastEndedEarly = false;
 
-void startRun(char dir, unsigned long windowMs) {
+void beginRun(char dir, bool byCounts, unsigned long amount) {
   if (g_runActive) {
     Serial.println(F("  already running -- 'x' stops it"));
     return;
@@ -492,7 +536,12 @@ void startRun(char dir, unsigned long windowMs) {
   }
 
   g_runDir      = dir;
-  g_runWindowMs = constrain(windowMs, RUN_MS_MIN, RUN_MS_MAX);
+  g_runByCounts = byCounts;
+  g_runTarget   = byCounts ? amount : 0;
+  // A count run keeps the full time backstop: reaching the target is what
+  // normally ends it, and if that never happens something still has to.
+  g_runWindowMs = byCounts ? RUN_MS_MAX
+                           : constrain(amount, RUN_MS_MIN, RUN_MS_MAX);
   g_runPulses      = 0;
   g_runCoastPulses = 0;
   g_runRejects     = 0;
@@ -508,8 +557,13 @@ void startRun(char dir, unsigned long windowMs) {
   Serial.print(F("  RUN  "));
   Serial.print(dir == 'e' ? F("EXTEND") : F("RETRACT"));
   Serial.print(F("  duty ")); Serial.print(g_speed);
-  Serial.print(F("  for ")); Serial.print(g_runWindowMs / 1000.0, 2);
-  Serial.println(F(" s   ('x' stops)"));
+  Serial.print(F("  for "));
+  if (byCounts) {
+    Serial.print(g_runTarget); Serial.print(F(" counts"));
+  } else {
+    Serial.print(g_runWindowMs / 1000.0, 2); Serial.print(F(" s"));
+  }
+  Serial.println(F("   ('x' stops)"));
   if (g_verbose) {
     Serial.println(F("  (per-pulse printing is held off while it runs -- the"));
     Serial.println(F("   serial writes are what would lose the count)"));
@@ -538,12 +592,18 @@ void printRunReport() {
   const unsigned long ranMs = g_runStopMs - g_runStartMs;
 
   Serial.println();
-  Serial.println(F("--- timed run ------------------------------------------"));
+  Serial.println(F("--- run ------------------------------------------------"));
   Serial.print(F("  direction     : "));
   Serial.print(g_runDir == 'e' ? F("EXTEND") : F("RETRACT"));
   Serial.print(F("        duty ")); Serial.println(g_speed);
-  Serial.print(F("  asked for     : ")); Serial.print(g_runWindowMs / 1000.0, 2);
-  Serial.println(F(" s"));
+
+  Serial.print(F("  asked for     : "));
+  if (g_runByCounts) {
+    Serial.print(g_runTarget); Serial.println(F(" counts"));
+  } else {
+    Serial.print(g_runWindowMs / 1000.0, 2); Serial.println(F(" s"));
+  }
+
   Serial.print(F("  ran           : ")); Serial.print(ranMs / 1000.0, 2);
   Serial.print(F(" s   (")); Serial.print(g_runWhy); Serial.println(F(")"));
 
@@ -553,6 +613,19 @@ void printRunReport() {
     Serial.print(F(" of them after the motor was cut)"));
   }
   Serial.println();
+
+  // The carriage does not stop when the current does, and how far past the
+  // cut it goes is the number every landing in actuator_v1 depends on. In
+  // milliseconds it is COAST_SETTLE_MS; in counts it is the error the deadband
+  // has to absorb. Neither has ever been measured on this hardware.
+  Serial.print(F("  coast         : "));
+  if (g_runCoastPulses > 0) {
+    Serial.print(g_runCoastPulses); Serial.print(F(" counts in "));
+    Serial.print(g_lastAcceptMs - g_runStopMs); Serial.println(F(" ms"));
+  } else {
+    Serial.print(F("no counts after the cut -- under one count, and under "));
+    Serial.print(RUN_COAST_MS); Serial.println(F(" ms"));
+  }
 
   if (PULSES_PER_CYCLE > 1) {
     Serial.print(F("  cycles        : "));
@@ -603,7 +676,34 @@ void printRunReport() {
     return;
   }
 
+  // What a count run is really for. Landing exactly on the target is not
+  // possible -- the decision to cut comes after the count that triggered it,
+  // and the carriage coasts after that -- so the interesting number is how far
+  // past it went, and whether that fits inside the deadband v1 will use.
+  if (g_runByCounts && !g_runStalled && g_runPulses >= g_runTarget) {
+    Serial.println();
+    if (g_runPulses > g_runTarget) {
+      Serial.print(F("  OVERSHOT by ")); Serial.print(g_runPulses - g_runTarget);
+      Serial.println(F(" counts."));
+    } else {
+      Serial.println(F("  Landed on the target."));
+    }
+    Serial.println(F("  That overshoot is coast, and it is the resolution floor"));
+    Serial.println(F("  at this duty -- no controller can land finer than the"));
+    Serial.println(F("  distance the carriage travels after the current is cut."));
+    Serial.println(F("  Config.h sets DEADBAND_COUNTS to 1, so if the overshoot"));
+    Serial.println(F("  is bigger than that, a move at this duty can never"));
+    Serial.println(F("  settle inside the deadband. Drop the duty with 'w' and"));
+    Serial.println(F("  repeat until it fits: that duty is SPEED_TRIM."));
+  }
+
   Serial.println();
+  if (g_runByCounts) {
+    Serial.println(F("  Now run the same count the other way. Where the rod"));
+    Serial.println(F("  lands short of where it started is backlash -- with the"));
+    Serial.println(F("  direction speed difference taken out, which is what a"));
+    Serial.println(F("  timed run cannot do."));
+  }
   Serial.println(F("  Measure how far the rod MOVED -- not its total length --"));
   Serial.println(F("  and type   m <mm>"));
   Serial.println(F("--------------------------------------------------------"));
@@ -635,8 +735,17 @@ void serviceRun() {
     return;
   }
 
+  // Checked after the ring buffer has been drained, so the count is as current
+  // as it can be. One loop pass of latency is nothing next to the coast that
+  // follows, which is the error that actually decides where the rod lands.
+  if (g_runByCounts && g_runPulses >= g_runTarget) {
+    endDrive(F("count reached"));
+    return;
+  }
+
   if (now - g_runStartMs >= g_runWindowMs) {
-    endDrive(F("window elapsed"));
+    endDrive(g_runByCounts ? F("backstop -- the count was never reached")
+                           : F("window elapsed"));
     return;
   }
 
@@ -656,7 +765,12 @@ void serviceRun() {
     Serial.print((now - g_runStartMs) / 1000.0, 1);
     Serial.print(F(" s   "));
     Serial.print(g_runPulses);
-    Serial.println(F(" pulses"));
+    if (g_runByCounts) {
+      Serial.print(F(" / ")); Serial.print(g_runTarget);
+      Serial.println(F(" counts"));
+    } else {
+      Serial.println(F(" pulses"));
+    }
   }
 }
 
@@ -773,6 +887,8 @@ void printHelp() {
   Serial.println(F("  ?        this help"));
   Serial.println(F("  e [ms]   run EXTEND  for ms and count pulses (10000)"));
   Serial.println(F("  r [ms]   run RETRACT for ms and count pulses (10000)"));
+  Serial.println(F("  +[n]     extend  n counts and stop  (1)"));
+  Serial.println(F("  -[n]     retract n counts and stop  (1)"));
   Serial.println(F("  x        stop the run now"));
   Serial.println(F("  w <n>    PWM duty, 60-255"));
   Serial.println(F("  m <mm>   distance the rod moved on the last run"));
@@ -808,7 +924,16 @@ void handleCommand(char* line) {
 
     case 'e':
     case 'r':
-      startRun(cmd, hasArg ? (unsigned long)argVal : RUN_MS_DEFAULT);
+      beginRun(cmd, false, hasArg ? (unsigned long)argVal : RUN_MS_DEFAULT);
+      break;
+
+    // Same fingering as actuator_v1: '+' and '-' are counts, 'e' and 'r' are
+    // open-loop time. Learning them here means learning them once.
+    case '+':
+    case '-':
+      beginRun(cmd == '+' ? 'e' : 'r', true,
+               (unsigned long)constrain(hasArg ? argVal : RUN_COUNTS_DEFAULT,
+                                        1L, RUN_COUNTS_MAX));
       break;
 
     case 'x':
@@ -937,6 +1062,11 @@ void setup() {
   Serial.println(F("to watch pulses arrive, then 's' for the sensor verdict."));
   Serial.println(F("Only once that is clean is the calibration worth doing:"));
   Serial.println(F("mark the rod, 'e 10000', measure the travel, 'm <mm>'."));
+  Serial.println();
+  Serial.println(F("'+50' and '-50' stop on the sensor instead of the clock."));
+  Serial.println(F("Out and back by COUNT should return the rod to its mark;"));
+  Serial.println(F("out and back by TIME will not, and the gap between those"));
+  Serial.println(F("two facts is the reason this system counts pulses."));
   Serial.println();
   Serial.println(F("Current limit the supply to 3-5 A. Ten seconds may be more"));
   Serial.println(F("stroke than is left -- start from somewhere with room."));

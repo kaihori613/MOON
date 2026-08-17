@@ -50,6 +50,23 @@ of the mechanism, true at any duty — and distance over time is mm per second,
 true only at the duty that run used. That first number is the floor on pointing
 resolution and the one measurement nothing in this repo could produce.
 
+**And `+50` / `-50` stop on the sensor instead of the clock** — same fingering
+as `actuator_v1`, where `+` and `-` are counts and `e`/`r` are open-loop time.
+Ten seconds out and ten seconds back does not return the rod to where it
+started: the load is not symmetric, the two directions travel at different
+rates, and that is the entire reason nothing here is positioned by stopwatch.
+Fifty counts out and fifty counts back should return it, and what it misses by
+is backlash on its own, with the speed difference taken out.
+
+A count run reports its **overshoot**, which is the second number this bench
+was missing. The motor is cut when the target count arrives and the carriage
+keeps moving, so the overshoot is coast measured in the unit the controller
+actually acts on — and it is the floor on where any move can land. `Config.h`
+asks for `DEADBAND_COUNTS = 1`; if the overshoot at a given duty is larger than
+that, a move at that duty can never settle inside the deadband. Dropping the
+duty until it fits is how `SPEED_TRIM` gets found. Every run also prints coast
+in counts *and* in milliseconds, which is `COAST_SETTLE_MS`.
+
 The run stops itself if the pulses stop while the motor is still commanded on,
 which is an internal cam cutting at the end of travel, and says so: the count
 and the distance still agree, but the rod stopped before the window did. It
@@ -255,7 +272,9 @@ has finished moving and the landing reports lie to you.
   return current.
 - **Coast has never been measured**, so `COAST_SETTLE_MS` is a guess. Set too
   short, every move is judged before the carriage has finished moving and the
-  landing report lies. It is the first constant to nail down on the bench.
+  landing report lies. It is the first constant to nail down on the bench, and
+  `reed_switch_test/` now reports it on every run — in milliseconds for this
+  constant, and in counts for the deadband. Still needs doing.
 - No off-target tests for the state machine, and no simulator any more, so
   there is currently no way to exercise it without hardware.
 - **The degrees readout is uncalibrated and shows `?`.** `a`/`b` fix that in a
