@@ -21,14 +21,27 @@
     bouncing, or a magnet being seen twice on one pass.
 
   WIRING
-    Reed switch one leg -> D2, other leg -> GND. Nothing else. INPUT_PULLUP is
-    enabled in software, so the pin reads HIGH when open, LOW when the magnet
-    closes the contact.
+    Reed switch one leg -> D2, other leg -> GND. INPUT_PULLUP is enabled in
+    software, so the pin reads HIGH when open, LOW when the magnet closes the
+    contact.
+
+  THE DRIVER IS HELD OFF, NOT IGNORED
+    This sketch still does not drive the motor. But leaving the driver's input
+    pins unconfigured is not the same as leaving them alone: after a reset they
+    are high-impedance inputs, and an L298N's ENA floating high with IN1 and
+    IN2 at different levels will run the motor. During a test whose entire
+    premise is that the carriage is stationary, that is the worst possible
+    failure -- it corrupts the measurement and drives the actuator unattended.
+
+    So setup() claims those pins and drives them low before anything else.
+    The bridge can then be powered, which is the whole point: the original
+    clean result on this sensor was measured with no bridge in the circuit,
+    and that is the one configuration where a clean result proves nothing.
 
   PROCEDURE
-    1. Motor OFF, actuator stationary. Type  n  for the noise-floor test.
-       Anything above zero is electrical pickup, not motion, and it will
-       corrupt position forever once the bridge starts switching amps.
+    1. Driver POWERED, motor connected, carriage stationary. Type  n  for the
+       noise-floor test. Anything above zero is electrical pickup, not motion,
+       and it will corrupt position forever once the bridge starts switching.
     2. Drive the actuator SLOWLY from the bench supply. Watch the pulses print.
        Slow travel is where double-counting is easiest to see.
     3. Drive it at full speed. Type  s  for the report.
@@ -38,6 +51,49 @@
 */
 
 const uint8_t REED_PIN = 2;      // must be interrupt-capable (D2/D3 on Uno)
+
+// --- The motor driver, which this sketch holds OFF -------------------------
+//  Same selection as actuator_v1/Config.h. Nothing here ever drives the motor;
+//  these pins exist only so they can be claimed and pulled low, instead of
+//  being left floating where the bridge decides for itself what to do.
+
+#define DRV_L298N  1
+#define DRV_HW039  2
+
+#define MOTOR_DRIVER  DRV_L298N      // <-- match your hardware
+
+#if MOTOR_DRIVER == DRV_L298N
+  const uint8_t PIN_ENA = 9;
+  const uint8_t PIN_IN1 = 6;
+  const uint8_t PIN_IN2 = 5;
+#elif MOTOR_DRIVER == DRV_HW039
+  const uint8_t PIN_RPWM = 9;
+  const uint8_t PIN_LPWM = 10;
+  const uint8_t PIN_EN   = 8;
+#else
+  #error "Set MOTOR_DRIVER to DRV_L298N or DRV_HW039"
+#endif
+
+// Called first thing in setup(), before anything that can block. With the
+// L298N, ENA low disables the output stage outright; IN1 and IN2 equal is
+// coast, so even a failed ENA cannot produce rotation.
+void holdDriverOff() {
+#if MOTOR_DRIVER == DRV_L298N
+  pinMode(PIN_ENA, OUTPUT);
+  pinMode(PIN_IN1, OUTPUT);
+  pinMode(PIN_IN2, OUTPUT);
+  digitalWrite(PIN_ENA, LOW);
+  digitalWrite(PIN_IN1, LOW);
+  digitalWrite(PIN_IN2, LOW);
+#else
+  pinMode(PIN_RPWM, OUTPUT);
+  pinMode(PIN_LPWM, OUTPUT);
+  pinMode(PIN_EN,   OUTPUT);
+  digitalWrite(PIN_RPWM, LOW);
+  digitalWrite(PIN_LPWM, LOW);
+  digitalWrite(PIN_EN,   LOW);
+#endif
+}
 
 // Live-adjustable with 'd', so you can find the right value on the bench
 // instead of reflashing between guesses.
@@ -429,6 +485,10 @@ void pollSerial() {
 // ---------------------------------------------------------------------------
 
 void setup() {
+  // Before the serial handshake, which can block: an unconfigured driver input
+  // is an input, and an L298N gets to decide for itself what that means.
+  holdDriverOff();
+
   Serial.begin(115200);
   while (!Serial) { ; }
 
@@ -439,11 +499,21 @@ void setup() {
 
   Serial.println();
   Serial.println(F("=== Reed Switch Test ==="));
-  Serial.println(F("Sensor only. This sketch does not drive the motor -- use"));
-  Serial.println(F("the bench supply for that."));
+  Serial.print(F("Driver held OFF: "));
+#if MOTOR_DRIVER == DRV_L298N
+  Serial.println(F("L298N, ENA D9 low, IN1 D6 and IN2 D5 low"));
+#else
+  Serial.println(F("HW-039, RPWM D9, LPWM D10, EN D8 all low"));
+#endif
+  Serial.println(F("Sensor only -- this sketch never turns the motor. Move the"));
+  Serial.println(F("carriage by hand, or from the bench supply direct."));
   Serial.println();
-  Serial.println(F("Start with 'n' (noise floor, actuator stopped), then drive"));
-  Serial.println(F("the actuator slowly and watch the pulses, then at full"));
+  Serial.println(F("POWER THE DRIVER for the noise floor test. Measuring it"));
+  Serial.println(F("with the bridge out of circuit is the one configuration"));
+  Serial.println(F("where a clean result proves nothing."));
+  Serial.println();
+  Serial.println(F("Start with 'n' (noise floor, carriage still), then move the"));
+  Serial.println(F("carriage slowly and watch the pulses, then at full"));
   Serial.println(F("speed, then 's' for the report."));
   Serial.println();
   printHelp();

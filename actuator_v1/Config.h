@@ -142,7 +142,7 @@ const int EEPROM_BASE_ADDR = 0;
 //
 //  Most backpacks are 0x27. A few are 0x3F. If the display stays blank but the
 //  backlight is on, try the other one.
-#define USE_LCD 1
+#define USE_LCD 0
 const uint8_t  LCD_I2C_ADDR   = 0x27;
 const uint8_t  LCD_COLS       = 16;
 const uint16_t LCD_REFRESH_MS = 200;

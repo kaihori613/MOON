@@ -14,7 +14,7 @@ replace them.
 |---|---|
 | `reed_switch_test/` | **Run on hardware.** Sensor is clean — see below |
 | `l298n_test/`, `actuator_test/` | **Bring-up. The motor turned.** Superseded by `actuator_v1/` |
-| `actuator_v1/` | **Compiles clean, 81% flash / 35% RAM on a 328P. Never run.** |
+| `actuator_v1/` | **Compiles clean, 63% flash / 17% RAM on a 328P. Never run.** |
 | Host yaw pointing | Written, never executed — no Python on the build machine yet |
 
 An earlier lineage, `actuator_system/`, was deleted in favour of v1. It was
@@ -140,12 +140,15 @@ currently no other way to see it. A saved position used to skip homing would be
 silently wrong exactly when something back-drove the dish; used as a check, the
 same number becomes an instrument.
 
-**Optional 16x2 I2C LCD** on A4/A5, showing position, degrees, and state. The
-HD44780-behind-a-PCF8574 driver is written directly onto `Wire` rather than
+**Optional 16x2 I2C LCD** on A4/A5, showing position, degrees, and state.
+`USE_LCD` currently defaults to `0` — no display is wired yet, and compiling it
+out costs 6 KB of flash and 361 bytes of RAM (63% → 81% flash with it on). Set
+it to `1` when the hardware arrives.
+
+The HD44780-behind-a-PCF8574 driver is written directly onto `Wire` rather than
 pulling in a library — the several `LiquidCrystal_I2C` forks disagree about
 constructor arguments, and the whole driver is under a hundred lines. If nothing
-acknowledges at the I2C address the sketch says so and runs without it. Set
-`USE_LCD` to `0` to drop it entirely.
+acknowledges at the I2C address, the sketch says so at boot and runs without it.
 
 Set `MOTOR_DRIVER` in `Config.h` — L298N (default) or HW-039. Everything
 tunable lives in that file; constants marked PLACEHOLDER have not been measured
@@ -234,7 +237,6 @@ has finished moving and the landing reports lie to you.
   there is currently no way to exercise it without hardware.
 - **The degrees readout is uncalibrated and shows `?`.** `a`/`b` fix that in a
   couple of minutes with a compass, but it needs the actuator drivable first.
-- Flash is at 81%, up from 53% before the LCD and EEPROM went in. `Wire` and
-  `snprintf`'s formatting machinery are most of the difference. Still room, but
-  not much — dropping `USE_LCD` recovers a large part of it if something more
-  important needs the space.
+- Flash sits at 63% with the LCD compiled out, 81% with it in. `Wire` and
+  `snprintf`'s formatting machinery are most of that difference. Room to work
+  either way, but not a lot once the display goes in.
