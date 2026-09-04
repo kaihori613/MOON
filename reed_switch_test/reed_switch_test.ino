@@ -113,6 +113,31 @@
 
 const uint8_t REED_PIN = 2;      // must be interrupt-capable (D2/D3 on Uno)
 
+// --- Panel inputs -----------------------------------------------------------
+//  Two hold-to-run buttons and a kill switch, all INPUT_PULLUP, all to GND.
+//  Same pins and same behaviour as actuator_v1, so the panel does not change
+//  meaning when you change sketch.
+const uint8_t PIN_BTN_EXTEND  = 3;
+const uint8_t PIN_BTN_RETRACT = 4;
+const uint8_t PIN_KILL        = 7;
+
+//  KILL SWITCH WIRING. Set to 0 for a normally-OPEN button -- the common
+//  pushbutton -- wired between D7 and GND. Unpressed reads HIGH and is
+//  healthy; pressing pulls D7 LOW and kills. That is how this bench is wired.
+//
+//  Set to 1 if the switch is normally CLOSED, held closed to GND so D7 reads
+//  LOW while healthy. That version is strictly safer: a broken wire, a pulled
+//  connector or a failed switch all read HIGH and all kill, where a
+//  normally-open button kills only when pressed and a severed wire disarms it
+//  silently. Worth moving to if the switch has an NC contact block.
+#define KILL_IS_NORMALLY_CLOSED 0
+
+//  Mechanical contacts, so tens of milliseconds rather than the microseconds
+//  the reed wants. The kill switch is deliberately NOT debounced: it acts on
+//  the first sample and latches, and chatter cannot un-latch it.
+const uint8_t  BTN_DEBOUNCE_MS   = 25;
+const uint16_t MANUAL_REVERSE_MS = 200;
+
 // --- The motor driver -------------------------------------------------------
 //  Same selection, same pins and same ordering as actuator_v1/Config.h. The
 //  bridge is off except during a timed run, and claimed low in setup() before
@@ -124,9 +149,36 @@ const uint8_t REED_PIN = 2;      // must be interrupt-capable (D2/D3 on Uno)
 #define MOTOR_DRIVER  DRV_L298N      // <-- match your hardware
 
 #if MOTOR_DRIVER == DRV_L298N
-  const uint8_t PIN_ENA = 9;
-  const uint8_t PIN_IN1 = 6;
-  const uint8_t PIN_IN2 = 5;
+  // The L298N carries TWO independent H-bridges on one die. Channel A died on
+  // this bench -- extend worked, retract did not, and swapping the motor leads
+  // moved the fault with the transistor pair rather than with the direction,
+  // which is what a dead output stage looks like. Channel B is the spare.
+  //
+  // Set to 1 or 2. If you simply move ENB/IN3/IN4 onto the channel-1 pins
+  // below, leave this at 1 -- the sketch cannot tell the difference. Use 2
+  // only if channel B is wired to its own pins as listed.
+  //
+  // Both channels share one die and one heat slug, so B has run as hot as A
+  // did. This is a spare, not a repair.
+  // Channel A is now known bad on this board, and in the worst way: OUT1's
+  // high-side is SHORTED. It measured 20 V driving extend, held ~20 V after
+  // motorOff(), and collapsed to 0 V only when the opposite command raised
+  // OUT2 to match it. A motor that keeps turning after the firmware has cut
+  // it, and that no kill switch can stop.
+  #define L298N_CHANNEL 2
+
+  #if L298N_CHANNEL == 1
+    const uint8_t PIN_ENA = 9;    // ENA
+    const uint8_t PIN_IN1 = 6;    // IN1
+    const uint8_t PIN_IN2 = 5;    // IN2
+  #elif L298N_CHANNEL == 2
+    const uint8_t PIN_ENA = 10;   // ENB  -- must be a PWM pin
+    const uint8_t PIN_IN1 = 8;    // IN3
+    const uint8_t PIN_IN2 = 12;   // IN4
+  #else
+    #error "Set L298N_CHANNEL to 1 or 2"
+  #endif
+
 #elif MOTOR_DRIVER == DRV_HW039
   const uint8_t PIN_RPWM = 9;
   const uint8_t PIN_LPWM = 10;
@@ -135,10 +187,14 @@ const uint8_t REED_PIN = 2;      // must be interrupt-capable (D2/D3 on Uno)
   #error "Set MOTOR_DRIVER to DRV_L298N or DRV_HW039"
 #endif
 
-// With the L298N, ENA low disables the output stage outright; IN1 and IN2
-// equal is coast, so even a failed ENA cannot produce rotation. With the
-// HW-039 the two PWM inputs are the whole of the off switch, which is why
-// both go low by digitalWrite rather than analogWrite(0).
+// This used to claim that ENA low disables the output stage outright, and that
+// IN1 and IN2 equal is coast, so even a failed ENA could not produce rotation.
+// That is wrong, and this bench disproved it: a shorted high-side holds its
+// output at the supply rail no matter what ENA and the IN pins are doing. None
+// of what follows is an off switch when a transistor is welded on -- only
+// opening the motor supply is. With the HW-039 the two PWM inputs are the whole
+// of the off switch, which is why both go low by digitalWrite rather than
+// analogWrite(0).
 void motorOff() {
 #if MOTOR_DRIVER == DRV_L298N
   analogWrite(PIN_ENA, 0);
@@ -157,6 +213,18 @@ void motorPins() {
   pinMode(PIN_ENA, OUTPUT);
   pinMode(PIN_IN1, OUTPUT);
   pinMode(PIN_IN2, OUTPUT);
+
+  #if L298N_CHANNEL == 2
+  // Park the dead channel. Its pins are not merely unused -- left as floating
+  // inputs, ENA can drift high while IN1 drifts low, which turns OUT1's LOW
+  // side on underneath a high side that is already shorted hard on. That is a
+  // dead short from the 24 V rail to ground, straight through the die, and it
+  // would take the good channel with it. Held low, the low sides stay off and
+  // the fault stays inert -- provided OUT1 is left unconnected.
+  pinMode(9, OUTPUT); digitalWrite(9, LOW);   // ENA
+  pinMode(6, OUTPUT); digitalWrite(6, LOW);   // IN1
+  pinMode(5, OUTPUT); digitalWrite(5, LOW);   // IN2
+  #endif
 #else
   pinMode(PIN_RPWM, OUTPUT);
   pinMode(PIN_LPWM, OUTPUT);
@@ -193,7 +261,7 @@ const unsigned long RUN_MS_MAX     = 30000;   // MAX_RUN_MS in Config.h
 const long RUN_COUNTS_DEFAULT = 1;            // bare '+' / '-', as in Config.h
 const long RUN_COUNTS_MAX     = 2000;
 
-const uint8_t SPEED_DEFAULT = 180;            // SPEED_RUN in Config.h
+const uint8_t SPEED_DEFAULT = 255;            // SPEED_RUN in Config.h
 const uint8_t SPEED_FLOOR   = 60;             // below this it buzzes, not moves
 
 // Motor commanded on but no pulse for this long: the actuator has either hit
@@ -207,18 +275,18 @@ const uint16_t RUN_GRACE_MS = 900;
 // The carriage does not stop when the current does. Pulses that arrive while
 // it coasts are real travel and are part of the distance about to be measured,
 // so keep counting through this window before reporting anything.
-const uint16_t RUN_COAST_MS = 400;
+const uint16_t RUN_COAST_MS = 1500;
 
 // Magnet passes per revolution of the sensed shaft. One magnet on the motor
 // shaft is the usual arrangement, in which case a pulse is a cycle and this is
 // 1. If yours carries more, set the real number and the report will divide.
 const uint8_t PULSES_PER_CYCLE = 1;
 
-const uint16_t RUN_TICK_MS = 1000;   // how often a run prints its progress
+const uint16_t RUN_TICK_MS = 100;   // how often a run prints its progress
 
 // Live-adjustable with 'd', so you can find the right value on the bench
 // instead of reflashing between guesses.
-unsigned long g_debounceUs = 3000;
+unsigned long g_debounceUs = 900;   // scope says the bounce burst is 350-400 us
 
 // A gap longer than this spans a pause between two moves, not travel. Real
 // travel at the slowest usable duty is orders of magnitude faster; anything
@@ -515,6 +583,24 @@ unsigned long g_runRejects     = 0;
 unsigned long g_runOverflowAt  = 0;    // overflow count when the run started
 unsigned long g_lastAcceptMs   = 0;
 
+// Live-adjustable with 't'. A run dying at the stall timeout when the rod is
+// plainly still moving is common enough on a loaded actuator -- slow travel,
+// a sagging supply -- that needing a reflash to test the theory is the wrong
+// trade.
+unsigned long g_stallMs = RUN_STALL_MS;
+
+// Live-adjustable with 'g', for the same reason the stall timeout is. A run
+// that dies at "never broke away" on a supply that is sagging into current
+// limit is not a stopped motor -- it is a motor that was not given long
+// enough. Needing a reflash to test that theory is the wrong trade.
+unsigned long g_graceMs = RUN_GRACE_MS;
+
+// How long since the last RAW edge, sampled at the moment a stall was
+// declared. Raw edges are timestamped before the debounce, so this is what
+// separates "the filter starved the stream" from "the carriage stopped" --
+// and those two have identical symptoms from anywhere else.
+unsigned long g_stallEdgeAgeMs = 0;
+
 const __FlashStringHelper* g_runWhy = nullptr;
 
 // The last completed run, kept so 'm' has something to divide by.
@@ -525,7 +611,36 @@ uint8_t       g_lastSpeed   = 0;
 char          g_lastDir     = 'e';
 bool          g_lastEndedEarly = false;
 
+// --- Panel state ------------------------------------------------------------
+//  Declared up here rather than beside the panel code below, because beginRun()
+//  has to be able to refuse while a button is held or the kill is latched.
+bool g_killLatched = false;
+
+uint8_t       g_extStable = 0, g_extRaw = 0;
+uint8_t       g_retStable = 0, g_retRaw = 0;
+unsigned long g_extChanged = 0, g_retChanged = 0;
+
+// A stall while the button is still down re-arms only on release. Without it,
+// leaning on a button at an end of travel re-energises the motor every
+// RUN_GRACE_MS forever, which at full duty is the quickest way to kill an
+// L298N that is already marginal.
+bool g_manualLockout = false;
+
+unsigned long g_reverseUntilMs = 0;
+
+char          g_manualDir     = 0;
+unsigned long g_manualStartMs = 0;
+unsigned long g_manualPulses0 = 0;
+
 void beginRun(char dir, bool byCounts, unsigned long amount) {
+  if (g_killLatched) {
+    Serial.println(F("  kill switch is latched -- release it and type 'k'"));
+    return;
+  }
+  if (g_manualDir != 0) {
+    Serial.println(F("  a panel button is held -- release it first"));
+    return;
+  }
   if (g_runActive) {
     Serial.println(F("  already running -- 'x' stops it"));
     return;
@@ -655,15 +770,37 @@ void printRunReport() {
     Serial.println(F("    printing off with 'v' and run it again."));
   }
 
-  if (g_runStalled) {
+  if (g_runStalled && g_runPulses > 0) {
     Serial.println();
-    Serial.println(F("  Ended early: the pulses stopped while the motor was"));
-    Serial.println(F("  still commanded on. Almost certainly an internal cam"));
-    Serial.println(F("  cutting at the end of travel, which is a normal ending"));
-    Serial.println(F("  -- but the rod stopped moving before the window did."));
-    Serial.println(F("  The count and the distance still agree with each other,"));
-    Serial.println(F("  so this run is fine to measure. The mm/s figure below"));
-    Serial.println(F("  will be right and the time will not mean what you asked."));
+    Serial.print(F("  Ended early: no accepted pulse for "));
+    Serial.print(g_stallMs);
+    Serial.println(F(" ms while still driving."));
+    Serial.print(F("  Last RAW edge was "));
+    Serial.print(g_stallEdgeAgeMs);
+    Serial.println(F(" ms before that verdict."));
+    Serial.println();
+
+    // Raw edges are counted ahead of the debounce. Still arriving while the
+    // accepted stream had gone quiet means the filter threw them away and the
+    // motor never stopped at all -- the one reading that separates a bad
+    // debounce from a bad supply, and neither is visible any other way.
+    if (g_stallEdgeAgeMs * 2 < g_stallMs) {
+      Serial.println(F("  VERDICT: THE DEBOUNCE STARVED IT. The sensor was still"));
+      Serial.println(F("  producing edges; this filter rejected them. The rod"));
+      Serial.println(F("  almost certainly kept moving. Lower the debounce with"));
+      Serial.println(F("  'd' -- it must sit well under the real pulse gap -- and"));
+      Serial.println(F("  do not calibrate against this run."));
+    } else {
+      Serial.println(F("  VERDICT: THE EDGES STOPPED TOO. The carriage really did"));
+      Serial.println(F("  stop. An internal cam at the end of travel is the normal"));
+      Serial.println(F("  case; a jam, a bridge in thermal shutdown, or a supply"));
+      Serial.println(F("  in current limit look identical from here. Check the"));
+      Serial.println(F("  supply's CC light and the bridge temperature."));
+      Serial.println();
+      Serial.println(F("  If it was the cam, this run is still fine to measure:"));
+      Serial.println(F("  the count and the distance agree. Only the time means"));
+      Serial.println(F("  something other than what you asked for."));
+    }
   }
 
   if (g_runPulses == 0) {
@@ -752,9 +889,17 @@ void serviceRun() {
   // Pulses stopping while the motor is still on is the end of travel or a jam,
   // and out here those look identical. Both want the current off now.
   const unsigned long since = now - (g_runPulses ? g_lastAcceptMs : g_runStartMs);
-  if (since >= (g_runPulses ? RUN_STALL_MS : RUN_GRACE_MS)) {
+  if (since >= (g_runPulses ? g_stallMs : g_graceMs)) {
     g_runStalled = true;
-    endDrive(g_runPulses ? F("pulses stopped -- end of travel, or jammed")
+
+    // Sampled here rather than in the report, because by the time the report
+    // runs the coast has finished and the answer has gone stale.
+    noInterrupts();
+    const unsigned long lastEdgeUs = g_lastEdgeUs;
+    interrupts();
+    g_stallEdgeAgeMs = (micros() - lastEdgeUs) / 1000UL;
+
+    endDrive(g_runPulses ? F("accepted pulses stopped -- see the verdict below")
                          : F("never broke away -- no pulse at all"));
     return;
   }
@@ -772,6 +917,152 @@ void serviceRun() {
       Serial.println(F(" pulses"));
     }
   }
+}
+
+
+// ---------------------------------------------------------------------------
+//  Panel  --  two hold-to-run buttons and a kill switch
+// ---------------------------------------------------------------------------
+//  A manual jog is not a run. It produces no run report and it is not what 'm'
+//  measures, because a jog held by thumb has no defined start and no defined
+//  end -- but the pulses it produces still go through the same ISR, the same
+//  debounce and the same histogram, so jogging by hand is a perfectly good way
+//  to feed 's'. Getting the carriage somewhere with room to move is most of
+//  what this bench does between measurements, and doing it by button beats
+//  typing 'r 2000' and waiting.
+//
+//  A commanded run owns the bridge while it lasts. Pressing a button during
+//  one stops it the same way 'x' does -- the coast still finishes and the
+//  report is still honest -- and the panel takes over once that is done.
+
+bool killAsserted() {
+#if KILL_IS_NORMALLY_CLOSED
+  return digitalRead(PIN_KILL) == HIGH;   // pressed, or the wire is broken
+#else
+  return digitalRead(PIN_KILL) == LOW;
+#endif
+}
+
+// Buttons to GND behind the internal pull-up, so a press reads LOW.
+bool buttonDown(uint8_t pin, uint8_t* stable, uint8_t* raw,
+                unsigned long* changedMs, unsigned long now) {
+  const uint8_t level = (digitalRead(pin) == LOW) ? 1 : 0;
+  if (level != *raw) {
+    *raw = level;
+    *changedMs = now;
+  } else if (*stable != level && (now - *changedMs) >= BTN_DEBOUNCE_MS) {
+    *stable = level;
+  }
+  return *stable != 0;
+}
+
+void manualStop(const __FlashStringHelper* why) {
+  motorOff();
+  const unsigned long moved = g_accepted - g_manualPulses0;
+
+  Serial.print(F("  manual "));
+  Serial.print(g_manualDir == 'e' ? F("EXTEND") : F("RETRACT"));
+  Serial.print(F(" ended ("));
+  Serial.print(why);
+  Serial.print(F(")  "));
+  Serial.print(moved);
+  Serial.print(F(" counts in "));
+  Serial.print((millis() - g_manualStartMs) / 1000.0, 2);
+  Serial.println(F(" s"));
+
+  g_manualDir = 0;
+}
+
+void serviceInputs() {
+  const unsigned long now = millis();
+
+  // Read first, every pass, and acted on from the first sample rather than
+  // after a debounce: no reading of this pin should be allowed to leave the
+  // motor running while it settles.
+  if (killAsserted()) {
+    if (!g_killLatched) {
+      g_killLatched = true;
+      motorOff();
+      g_manualDir   = 0;
+      g_runActive   = false;
+      g_runCoasting = false;
+      Serial.println();
+      Serial.println(F("  KILL SWITCH. Motor off. Any run in progress is"));
+      Serial.println(F("  abandoned -- do not calibrate against it. Nothing"));
+      Serial.println(F("  runs until the switch is released AND 'k' is typed."));
+    }
+    return;
+  }
+
+  // Released, but still latched. A kill switch that re-arms the moment it is
+  // let go is a pause button with a frightening colour.
+  if (g_killLatched) return;
+
+  const bool ext = buttonDown(PIN_BTN_EXTEND,  &g_extStable, &g_extRaw,
+                              &g_extChanged, now);
+  const bool ret = buttonDown(PIN_BTN_RETRACT, &g_retStable, &g_retRaw,
+                              &g_retChanged, now);
+
+  // Both down is not a direction, and it is what a chafed loom looks like.
+  char want = 0;
+  if (ext && !ret)      want = 'e';
+  else if (ret && !ext) want = 'r';
+
+  if (g_manualLockout) {
+    if (!ext && !ret) g_manualLockout = false;
+    return;
+  }
+
+  // A commanded run owns the bridge. The button stops it and then waits for
+  // the coast to finish, so the count and the report still describe the same
+  // stretch of travel.
+  if (g_runActive) {
+    if (want != 0 && !g_runCoasting) endDrive(F("manual button pressed"));
+    return;
+  }
+
+  if (want == 0) {
+    if (g_manualDir != 0) manualStop(F("button released"));
+    return;
+  }
+
+  if (g_manualDir == want) {
+    // The same watchdog a run gets, and for the same reason: pulses stopping
+    // under power is a cam or a jam, and both want the current off now.
+    const bool moving = (g_accepted > g_manualPulses0);
+    const unsigned long since = now - (moving ? g_lastAcceptMs : g_manualStartMs);
+    if (since >= (moving ? g_stallMs : g_graceMs)) {
+      manualStop(moving ? F("pulses stopped -- cam, jam, or supply")
+                        : F("never broke away -- no pulse at all"));
+      g_manualLockout = true;
+      Serial.println(F("  Release the button to re-arm."));
+    }
+    return;
+  }
+
+  if (g_manualDir != 0) {              // reversal: coast in between
+    manualStop(F("reversing"));
+    g_reverseUntilMs = now + MANUAL_REVERSE_MS;
+    return;
+  }
+
+  if (now < g_reverseUntilMs) return;
+
+  if (g_speed < SPEED_FLOOR) {
+    g_manualLockout = true;
+    Serial.println(F("  duty is below the floor -- 'w <60-255>' first"));
+    return;
+  }
+
+  g_manualDir     = want;
+  g_manualStartMs = now;
+  g_manualPulses0 = g_accepted;
+  motorApply(want, g_speed);
+
+  Serial.print(F("  MANUAL "));
+  Serial.print(want == 'e' ? F("EXTEND") : F("RETRACT"));
+  Serial.print(F(" at duty "));
+  Serial.println(g_speed);
 }
 
 // The calibration itself. Distance over pulses is a property of the mechanism;
@@ -895,9 +1186,17 @@ void printHelp() {
   Serial.println(F("  s        sensor report"));
   Serial.println(F("  z        zero all statistics"));
   Serial.println(F("  d <us>   set the debounce window (no reflash needed)"));
+  Serial.println(F("  t <ms>   stall timeout, 100-10000 (default 1400)"));
+  Serial.println(F("  g <ms>   breakaway grace, 100-10000"));
   Serial.println(F("  n        noise floor test -- actuator must be STOPPED"));
   Serial.println(F("  v        toggle per-pulse printing"));
   Serial.println(F("  p        read the pin level right now"));
+  Serial.println(F("  b        panel input levels -- buttons and kill"));
+  Serial.println(F("  k        clear a latched kill switch"));
+  Serial.println(F("--- panel ----------------------------------------------"));
+  Serial.println(F("  D3 held  EXTEND  while held"));
+  Serial.println(F("  D4 held  RETRACT while held"));
+  Serial.println(F("  D7       KILL -- latches; release it, then 'k'"));
   Serial.println(F("--------------------------------------------------------"));
 }
 
@@ -913,7 +1212,7 @@ void handleCommand(char* line) {
   // Anything that would move the goalposts under a run in progress: the count
   // and the distance have to describe the same stretch of travel or the
   // calibration is meaningless.
-  if (g_runActive && (cmd == 'z' || cmd == 'd' || cmd == 'n')) {
+  if (g_runActive && (cmd == 'z' || cmd == 'd' || cmd == 'n' || cmd == 't' || cmd == 'g')) {
     Serial.println(F("  not while a run is going -- 'x' stops it"));
     return;
   }
@@ -937,7 +1236,11 @@ void handleCommand(char* line) {
       break;
 
     case 'x':
-      if (g_runActive && !g_runCoasting) {
+      if (g_manualDir != 0) {
+        manualStop(F("stopped by hand"));
+        g_manualLockout = true;   // the button may well still be down
+        Serial.println(F("  release the button to re-arm the panel"));
+      } else if (g_runActive && !g_runCoasting) {
         endDrive(F("stopped by hand"));
       } else if (g_runActive) {
         Serial.println(F("  motor is already off -- letting the coast finish"));
@@ -945,6 +1248,21 @@ void handleCommand(char* line) {
         motorOff();               // belt and braces, costs nothing
         Serial.println(F("  already stopped"));
       }
+      break;
+
+    case 'k':
+      if (!g_killLatched) {
+        Serial.println(F("  the kill switch is not latched"));
+        break;
+      }
+      // Clearing a kill that is still thrown would arm the bridge against a
+      // switch that is still saying no.
+      if (killAsserted()) {
+        Serial.println(F("  kill switch is still thrown -- release it first"));
+        break;
+      }
+      g_killLatched = false;
+      Serial.println(F("  kill cleared -- the bench is live again"));
       break;
 
     case 'w':
@@ -988,6 +1306,34 @@ void handleCommand(char* line) {
       Serial.println(F("to measure it properly."));
       break;
 
+    case 't':
+      if (!hasArg) {
+        Serial.print(F("stall timeout = ")); Serial.print(g_stallMs);
+        Serial.println(F(" ms"));
+        break;
+      }
+      g_stallMs = (unsigned long)constrain(argVal, 100L, 10000L);
+      Serial.print(F("stall timeout = ")); Serial.print(g_stallMs);
+      Serial.println(F(" ms"));
+      Serial.println(F("This is a diagnostic, not a fix. Raising it past the"));
+      Serial.println(F("real pulse gap only delays the same verdict -- and it"));
+      Serial.println(F("also delays cutting current into a genuine jam."));
+      break;
+
+    case 'g':
+      if (!hasArg) {
+        Serial.print(F("breakaway grace = ")); Serial.print(g_graceMs);
+        Serial.println(F(" ms"));
+        break;
+      }
+      g_graceMs = (unsigned long)constrain(argVal, 100L, 10000L);
+      Serial.print(F("breakaway grace = ")); Serial.print(g_graceMs);
+      Serial.println(F(" ms"));
+      Serial.println(F("How long the motor may run with no pulse at all before"));
+      Serial.println(F("the run is called dead. Raise it if the supply sags at"));
+      Serial.println(F("breakaway; it does not help a motor that cannot turn."));
+      break;
+
     case 'n': noiseFloorTest(); break;
 
     case 'v':
@@ -995,6 +1341,34 @@ void handleCommand(char* line) {
       Serial.print(F("per-pulse printing "));
       Serial.println(g_verbose ? F("on") : F("off"));
       break;
+
+    case 'b': {
+      // Raw pin levels AND the debounced state, side by side. If a pin reads
+      // pressed with nothing touched, that is the fault -- and a stuck EXTEND
+      // silently suppresses RETRACT, because both-down is treated as stop.
+      const bool e3 = (digitalRead(PIN_BTN_EXTEND)  == LOW);
+      const bool r4 = (digitalRead(PIN_BTN_RETRACT) == LOW);
+      const bool k7 = (digitalRead(PIN_KILL)        == LOW);
+
+      Serial.println();
+      Serial.println(F("--- panel inputs ---------------------------------------"));
+      Serial.print(F("  D3 extend   raw ")); Serial.print(e3 ? F("LOW  (pressed)") : F("HIGH (open)"));
+      Serial.print(F("   debounced ")); Serial.println(g_extStable ? F("DOWN") : F("up"));
+      Serial.print(F("  D4 retract  raw ")); Serial.print(r4 ? F("LOW  (pressed)") : F("HIGH (open)"));
+      Serial.print(F("   debounced ")); Serial.println(g_retStable ? F("DOWN") : F("up"));
+      Serial.print(F("  D7 kill     raw ")); Serial.print(k7 ? F("LOW ") : F("HIGH"));
+      Serial.print(F("   asserted ")); Serial.print(killAsserted() ? F("YES") : F("no "));
+      Serial.print(F("   latched ")); Serial.println(g_killLatched ? F("YES") : F("no"));
+      Serial.print(F("  manual dir  ")); Serial.print(g_manualDir == 0 ? F("--") : (g_manualDir == 'e' ? F("EXTEND") : F("RETRACT")));
+      Serial.print(F("   lockout ")); Serial.println(g_manualLockout ? F("YES") : F("no"));
+      Serial.println();
+      Serial.println(F("  With nothing pressed all three should read HIGH."));
+      Serial.println(F("  A pin stuck LOW is a wiring fault. A stuck D3 will"));
+      Serial.println(F("  suppress RETRACT entirely: both buttons down is"));
+      Serial.println(F("  treated as stop, never as a direction."));
+      Serial.println(F("--------------------------------------------------------"));
+      break;
+    }
 
     case 'p':
       Serial.print(F("D"));
@@ -1038,6 +1412,9 @@ void setup() {
   while (!Serial) { ; }
 
   pinMode(REED_PIN, INPUT_PULLUP);
+  pinMode(PIN_BTN_EXTEND,  INPUT_PULLUP);
+  pinMode(PIN_BTN_RETRACT, INPUT_PULLUP);
+  pinMode(PIN_KILL,        INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(REED_PIN), onEdge, FALLING);
 
   zeroStats();
@@ -1046,7 +1423,12 @@ void setup() {
   Serial.println(F("=== Reed Switch Test -- sensor, and mm per pulse ==="));
   Serial.print(F("Driver: "));
 #if MOTOR_DRIVER == DRV_L298N
-  Serial.println(F("L298N, ENA D9, IN1 D6, IN2 D5 -- all low until a run"));
+  Serial.print(F("L298N channel "));
+  Serial.print(L298N_CHANNEL);
+  Serial.print(F(" -- EN D")); Serial.print(PIN_ENA);
+  Serial.print(F(", IN D")); Serial.print(PIN_IN1);
+  Serial.print(F(" / D")); Serial.print(PIN_IN2);
+  Serial.println(F(" -- all low until a run"));
 #else
   Serial.println(F("HW-039, RPWM D9, LPWM D10, EN D8 -- all low until a run"));
 #endif
@@ -1071,11 +1453,19 @@ void setup() {
   Serial.println(F("Current limit the supply to 3-5 A. Ten seconds may be more"));
   Serial.println(F("stroke than is left -- start from somewhere with room."));
   Serial.println();
+  if (killAsserted()) {
+    g_killLatched = true;
+    Serial.println(F("KILL SWITCH is thrown at boot. Nothing will move until"));
+    Serial.println(F("it is released and 'k' is typed."));
+    Serial.println();
+  }
+
   printHelp();
 }
 
 void loop() {
   pollSerial();
+  serviceInputs();
 
   // Drain the ring buffer and judge each gap. Doing this here rather than in
   // the ISR is what lets the report account for rejected edges.
@@ -1113,12 +1503,14 @@ void loop() {
       if (gap > g_maxAcceptUs) g_maxAcceptUs = gap;
     }
 
+    // Outside the run test on purpose: the panel jog needs the same watchdog,
+    // and it is not a run.
+    g_lastAcceptMs = millis();
+
     if (g_runActive) {
       g_runPulses++;
       if (g_runCoasting) g_runCoastPulses++;
-      g_lastAcceptMs = millis();
     }
-
     // Serial writes during a run are what would overflow the ring and cost the
     // count the whole measurement rests on, so the run prints once a second
     // and nothing else.
