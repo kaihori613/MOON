@@ -143,6 +143,7 @@ enum State : uint8_t {
   ST_SEEK,        // closed loop, toward g_target
   ST_HOME,        // retracting into the near stop to establish zero
   ST_MEASURE,     // extending into the far stop to learn the travel
+  ST_MANUAL,      // a panel button is held down
   ST_FAULT        // motor off, needs 'k'
 };
 
@@ -150,7 +151,8 @@ enum Fault : uint8_t {
   FAULT_NONE,
   FAULT_STALL,      // pulses stopped mid-move: a jam, or an unexpected end
   FAULT_TIMEOUT,    // ran past MAX_RUN_MS with nothing else stopping it
-  FAULT_NOT_HOMED   // absolute move asked for before there was an origin
+  FAULT_NOT_HOMED,  // absolute move asked for before there was an origin
+  FAULT_KILLED      // kill switch thrown -- latched until cleared
 };
 
 State g_state = ST_IDLE;
@@ -218,10 +220,12 @@ float degreesNow() {
 const __FlashStringHelper* stateName() {
   switch (g_state) {
     case ST_IDLE:    return F("IDLE");
+
     case ST_JOG:     return F("JOG");
     case ST_SEEK:    return F("SEEK");
     case ST_HOME:    return F("HOME");
     case ST_MEASURE: return F("MEASURE");
+    case ST_MANUAL:  return F("MANUAL");
     default:         return F("FAULT");
   }
 }
@@ -231,6 +235,7 @@ const __FlashStringHelper* faultName() {
     case FAULT_STALL:     return F("STALL");
     case FAULT_TIMEOUT:   return F("TIMEOUT");
     case FAULT_NOT_HOMED: return F("NOT_HOMED");
+    case FAULT_KILLED:    return F("KILLED");
     default:              return F("none");
   }
 }
@@ -543,9 +548,154 @@ void updateSeek(unsigned long now) {
   if (want != g_applied) motorApply(g_dir, want);
 }
 
+// ---------------------------------------------------------------------------
+//  Panel inputs  --  two hold-to-run buttons and a kill switch
+// ---------------------------------------------------------------------------
+//  Extend on D3, retract on D4, kill on D7. The buttons run the motor only
+//  while they are held, and they go through startMotion() like every other
+//  move, so a manual jog counts pulses and tracks position exactly as a
+//  commanded one does. Driving the bridge directly from here would have been
+//  fewer lines and would have silently desynchronised position the first time
+//  anyone touched the panel.
+//
+//  What the buttons deliberately do NOT do is bypass the stall watchdog. A
+//  held button into a cam limit looks exactly like a jam, and both want the
+//  current off -- see onStall(). Soft limits ARE bypassed, because the panel
+//  is the manual override and the internal cams are the real protection.
+
+bool g_killLatched = false;
+
+uint8_t       g_extStable = 0, g_extRaw = 0;
+uint8_t       g_retStable = 0, g_retRaw = 0;
+unsigned long g_extChanged = 0, g_retChanged = 0;
+
+// A stall while a button is still down re-arms only on release. Without this,
+// leaning on a button at an end of travel re-energises the motor every
+// START_GRACE_MS forever, which at full duty is the quickest way there is to
+// destroy the bridge.
+bool g_manualLockout = false;
+
+// A thumb can ask for a direction reversal far faster than the console can,
+// and reversing a loaded motor with no coast between is the worst moment the
+// supply and the bridge will ever see.
+unsigned long g_reverseUntilMs = 0;
+
+bool killAsserted() {
+#if KILL_IS_NORMALLY_CLOSED
+  return digitalRead(PIN_KILL) == HIGH;   // pressed, or the wire is broken
+#else
+  return digitalRead(PIN_KILL) == LOW;
+#endif
+}
+
+// Buttons to GND behind the internal pull-up, so a press reads LOW. Held for
+// BTN_DEBOUNCE_MS before it counts, which is generous for a contact and still
+// imperceptible to the thumb pressing it.
+bool buttonDown(uint8_t pin, uint8_t* stable, uint8_t* raw,
+                unsigned long* changedMs, unsigned long now) {
+  const uint8_t level = (digitalRead(pin) == LOW) ? 1 : 0;
+  if (level != *raw) {
+    *raw = level;
+    *changedMs = now;
+  } else if (*stable != level && (now - *changedMs) >= BTN_DEBOUNCE_MS) {
+    *stable = level;
+  }
+  return *stable != 0;
+}
+
+void serviceInputs() {
+  const unsigned long now = millis();
+
+  // Read first, every pass, and acted on from the first sample rather than
+  // after a debounce: there is no reading of this pin that should be allowed
+  // to leave the motor running while it settles.
+  if (killAsserted()) {
+    if (!g_killLatched) {
+      g_killLatched = true;
+      haltMotor();
+      enterFault(FAULT_KILLED);
+      Serial.println(F("  KILL SWITCH. Buttons and commands are refused until"));
+      Serial.println(F("  the switch is released AND 'k' is typed."));
+    }
+    return;
+  }
+
+  // Released, but still latched. Letting the release re-arm by itself would
+  // mean a dish starts moving again because somebody took their hand off
+  // something, which is not what anyone reaches for a kill switch expecting.
+  if (g_killLatched) return;
+
+  const bool ext = buttonDown(PIN_BTN_EXTEND,  &g_extStable, &g_extRaw,
+                              &g_extChanged, now);
+  const bool ret = buttonDown(PIN_BTN_RETRACT, &g_retStable, &g_retRaw,
+                              &g_retChanged, now);
+
+  // Both down is not a direction, and it is also what a chafed loom looks
+  // like. Either way the answer is to stop, never to pick one.
+  char want = 0;
+  if (ext && !ret)      want = 'e';
+  else if (ret && !ext) want = 'r';
+
+  if (g_manualLockout) {
+    if (!ext && !ret) g_manualLockout = false;
+    return;
+  }
+
+  if (want == 0) {
+    if (g_state == ST_MANUAL) {
+      const long here = position();
+      enterIdle();
+      Serial.print(F("  manual stop, pos="));
+      Serial.println(here);
+    }
+    return;
+  }
+
+  if (g_state == ST_MANUAL) {
+    if (g_dir == want) return;              // already going that way
+    enterIdle();                            // reversal: coast in between
+    g_reverseUntilMs = now + REVERSE_DEAD_MS;
+    return;
+  }
+
+  if (now < g_reverseUntilMs) return;
+
+  // The same rule the console gets. A fault is cleared deliberately, with 'k',
+  // not by leaning on a button until something happens.
+  if (g_state == ST_FAULT) return;
+
+  // A held button outranks whatever the console asked for -- but it stops that
+  // move properly rather than seizing the bridge out from under it, and takes
+  // over on the next pass once the state machine has tidied up.
+  if (g_state != ST_IDLE) {
+    // The console move may well have been going the other way, and stopNow()
+    // does not coast. Charge the reversal deadtime unconditionally rather
+    // than work out whether this particular takeover needed it.
+    stopNow(F("manual button"));
+    g_reverseUntilMs = now + REVERSE_DEAD_MS;
+    return;
+  }
+  if (MANUAL_SPEED == 0) {
+    g_manualLockout = true;
+    Serial.println(F("  speed is zero -- 'v <n>' before the buttons do anything"));
+    return;
+  }
+
+  g_state = ST_MANUAL;
+  startMotion(want, MANUAL_SPEED);
+
+  Serial.print(F("  MANUAL "));
+  Serial.print(want == 'e' ? F("EXTEND") : F("RETRACT"));
+  Serial.print(F(" at duty "));
+  Serial.println(MANUAL_SPEED);
+}
+
 // Pulses have stopped while motion is still commanded. Whether that is good
 // news depends entirely on what we were trying to do.
 void onStall() {
+  // haltMotor() clears g_dir, so the direction has to be taken first or every
+  // message below reports a retract whichever way it was going.
+  const char dir = g_dir;
   haltMotor();
   g_hitHardLimit = true;
 
@@ -625,11 +775,26 @@ void onStall() {
       saveState();
       return;
 
+    case ST_MANUAL:
+      // Holding a button into a cam limit is the normal way to reach an end
+      // of travel, so this is not a fault. But the button is still down, and
+      // re-energising against a stop every START_GRACE_MS would cook the
+      // bridge -- so the panel re-arms only once the button is released.
+      g_state = ST_IDLE;
+      g_manualLockout = true;
+      saveState();
+      Serial.print(F("  manual: pulses ceased driving "));
+      Serial.print(dir == 'e' ? F("extend") : F("retract"));
+      Serial.print(F(", pos="));
+      Serial.println(position());
+      Serial.println(F("  End of travel, or a jam. Release the button to re-arm."));
+      return;
+
     case ST_JOG:
       // Expected, and useful: this is how a jog finds an end of travel.
       g_state = ST_IDLE;
       Serial.print(F("  stopped: pulses ceased while still driving "));
-      Serial.print(g_dir == 'e' ? F("extend") : F("retract"));
+      Serial.print(dir == 'e' ? F("extend") : F("retract"));
       Serial.print(F(", pos="));
       Serial.println(position());
       Serial.println(F("  End of travel, or a jam. Nothing out here can tell"));
@@ -739,6 +904,132 @@ void noiseFloorTest() {
     setPosition(before);
     Serial.print(F("  position restored to "));
     Serial.println(before);
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Panel watch  --  what D3, D4 and D7 actually do
+// ---------------------------------------------------------------------------
+//  serviceInputs() stops a manual move the instant the pin reads released, so
+//  a button that will not let go is a button the Arduino still sees held. This
+//  says which. The motor stays off for the whole test, so what comes out is
+//  the switch and its loom on their own, with no bridge noise on top of them.
+//
+//  Deliberately runs the same buttonDown() the live path runs, rather than a
+//  second debounce written to agree with it. A diagnostic that filters
+//  differently from the code it is diagnosing is worse than none.
+
+const unsigned long PANEL_TEST_MS = 10000;
+
+const __FlashStringHelper* panelLabel(uint8_t i) {
+  switch (i) {
+    case 0:  return F("EXTEND ");
+    case 1:  return F("RETRACT");
+    default: return F("KILL   ");
+  }
+}
+
+void panelWatch() {
+  if (g_state != ST_IDLE) {
+    Serial.println(F("  not while it is moving"));
+    return;
+  }
+
+  const uint8_t pins[3] = { PIN_BTN_EXTEND, PIN_BTN_RETRACT, PIN_KILL };
+
+  Serial.println(F("  Panel watch: 10 s, motor OFF for all of it. Press and"));
+  Serial.println(F("  release each button a few times, then take your hand off"));
+  Serial.println(F("  everything well before it ends."));
+
+  uint8_t       stable[3], raw[3], lastRaw[3];
+  unsigned long changed[3], lowMs[3], lowSince[3];
+  uint16_t      bounces[3], presses[3];
+
+  const unsigned long start = millis();
+  for (uint8_t i = 0; i < 3; i++) {
+    const uint8_t level = (digitalRead(pins[i]) == LOW) ? 1 : 0;
+    stable[i] = raw[i] = lastRaw[i] = level;
+    changed[i]  = start;
+    bounces[i]  = 0;
+    presses[i]  = 0;
+    lowMs[i]    = 0;
+    lowSince[i] = level ? start : 0;
+  }
+
+  while (millis() - start < PANEL_TEST_MS) {
+    const unsigned long now = millis();
+
+    for (uint8_t i = 0; i < 3; i++) {
+      // Raw and unfiltered first: contact bounce is worth counting even
+      // though the debounce is about to hide it.
+      const uint8_t level = (digitalRead(pins[i]) == LOW) ? 1 : 0;
+      if (level != lastRaw[i]) {
+        lastRaw[i] = level;
+        bounces[i]++;
+      }
+
+      const uint8_t before = stable[i];
+      buttonDown(pins[i], &stable[i], &raw[i], &changed[i], now);
+      if (stable[i] == before) continue;
+
+      if (stable[i]) {
+        presses[i]++;
+        lowSince[i] = now;
+      } else if (lowSince[i]) {
+        lowMs[i] += now - lowSince[i];
+        lowSince[i] = 0;
+      }
+
+      Serial.print(F("  "));
+      Serial.print(now - start);
+      Serial.print(F(" ms  D"));
+      Serial.print(pins[i]);
+      Serial.print(' ');
+      Serial.print(panelLabel(i));
+      Serial.println(stable[i] ? F("  LOW  (reads pressed)")
+                               : F("  HIGH (reads released)"));
+    }
+  }
+
+  const unsigned long end = millis();
+  Serial.println();
+
+  for (uint8_t i = 0; i < 3; i++) {
+    if (stable[i] && lowSince[i]) lowMs[i] += end - lowSince[i];
+
+    Serial.print(F("  D"));
+    Serial.print(pins[i]);
+    Serial.print(' ');
+    Serial.print(panelLabel(i));
+    Serial.print(F("  presses="));
+    Serial.print(presses[i]);
+    Serial.print(F("  low="));
+    Serial.print(lowMs[i]);
+    Serial.print(F(" ms  raw edges="));
+    Serial.print(bounces[i]);
+    Serial.println(stable[i] ? F("  <-- ENDED LOW") : F("  ended high"));
+  }
+
+  Serial.println();
+
+  if (stable[0] || stable[1] || stable[2]) {
+    Serial.println(F("  A pin ended LOW with nothing held. That is exactly what"));
+    Serial.println(F("  a button that will not stop looks like from in here:"));
+    Serial.println(F("  the release is what stops the motor, and the release"));
+    Serial.println(F("  never arrived. A latching or toggle switch rather than a"));
+    Serial.println(F("  momentary one, a shorted loom, or the button wired to"));
+    Serial.println(F("  something other than GND."));
+  } else if (presses[0] == 0 && presses[1] == 0 && presses[2] == 0) {
+    Serial.println(F("  Nothing moved on any pin. Either nothing was pressed, or"));
+    Serial.println(F("  the buttons never reach GND -- check the common wire"));
+    Serial.println(F("  before suspecting anything else."));
+  } else {
+    Serial.println(F("  Every pin came back HIGH on release, so the switches are"));
+    Serial.println(F("  sound with the motor off. If a held button still will not"));
+    Serial.println(F("  stop with the bridge running, the motor loom is holding"));
+    Serial.println(F("  the input down and the internal pull-up is too weak to"));
+    Serial.println(F("  argue: 4.7k to 5V at the pin, 100nF across the button,"));
+    Serial.println(F("  and a ground return that does not carry motor current."));
   }
 }
 
@@ -883,6 +1174,9 @@ void lcdUpdate(unsigned long now) {
     case ST_SEEK:
       snprintf(l2, sizeof(l2), "SEEK  ->%7ld", g_target);
       break;
+    case ST_MANUAL:
+      snprintf(l2, sizeof(l2), "MAN %s", g_dir == 'e' ? "EXTEND" : "RETRACT");
+      break;
     case ST_JOG:
       snprintf(l2, sizeof(l2), "JOG %s", g_dir == 'e' ? "EXTEND" : "RETRACT");
       break;
@@ -927,6 +1221,14 @@ void printStatus() {
   Serial.print(F("  dir="));
   Serial.print(g_dir == 'e' ? F("ext") : g_dir == 'r' ? F("ret") : F("--"));
   Serial.print(F("  pwm="));    Serial.print(g_applied);
+
+  // Raw levels, no debounce. Typed while something refuses to stop, this is
+  // the answer: a letter means that pin is reading LOW at this instant.
+  Serial.print(F("  panel="));
+  Serial.print(digitalRead(PIN_BTN_EXTEND)  == LOW ? 'E' : '-');
+  Serial.print(digitalRead(PIN_BTN_RETRACT) == LOW ? 'R' : '-');
+  Serial.print(digitalRead(PIN_KILL)        == LOW ? 'K' : '-');
+
   Serial.print(F("  hz="));     Serial.print(pulseHz(), 1);
   Serial.print(F("  pulses=")); Serial.print(pulseTotal());
   Serial.print(F("  step="));   Serial.print(g_step);
@@ -961,6 +1263,11 @@ void printHelp() {
   Serial.println(F("  h            home: retract into the near stop"));
   Serial.println(F("  c            calibrate: home, then learn the full travel"));
   Serial.println(F("  z            zero here (forgets travel -- see the code)"));
+  Serial.println(F("--- panel ----------------------------------------------"));
+  Serial.println(F("  D3 held      EXTEND  while held"));
+  Serial.println(F("  D4 held      RETRACT while held"));
+  Serial.println(F("  D7           KILL -- latches; release it, then 'k'"));
+  Serial.println(F("  p            panel watch, 10 s -- what those pins do"));
   Serial.println(F("--- everything else ------------------------------------"));
   Serial.println(F("  <Enter>      STOP  (also 'x')"));
   Serial.println(F("  s            status"));
@@ -1211,6 +1518,7 @@ void handleCommand(char* line) {
     case 'v': cmdSpeed(arg);    break;
     case 'd': cmdDebounce(arg); break;
     case 'n': noiseFloorTest(); break;
+    case 'p': panelWatch();     break;
 
     case 'a': cmdAnglePoint('a', arg); break;
     case 'b': cmdAnglePoint('b', arg); break;
@@ -1237,6 +1545,13 @@ void handleCommand(char* line) {
         Serial.println(F("  no fault to clear"));
         break;
       }
+      // Clearing a kill that is still thrown would arm the bridge against a
+      // switch that is still saying no.
+      if (g_fault == FAULT_KILLED && killAsserted()) {
+        Serial.println(F("  kill switch is still thrown -- release it first"));
+        break;
+      }
+      g_killLatched = false;
       g_fault = FAULT_NONE;
       g_state = ST_IDLE;
       Serial.println(F("  fault cleared"));
@@ -1284,6 +1599,13 @@ void setup() {
 #endif
   motorOff();
 
+  // Panel inputs, claimed alongside the bridge and before the serial handshake
+  // that can block. A kill switch that only becomes real once a terminal has
+  // attached is not a kill switch.
+  pinMode(PIN_BTN_EXTEND,  INPUT_PULLUP);
+  pinMode(PIN_BTN_RETRACT, INPUT_PULLUP);
+  pinMode(PIN_KILL,        INPUT_PULLUP);
+
   pinMode(PIN_REED, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PIN_REED), onReedEdge, FALLING);
 
@@ -1294,7 +1616,11 @@ void setup() {
   Serial.println(F("=== Actuator System Bench Console ==="));
   Serial.print(F("v1, driver = "));
 #if MOTOR_DRIVER == DRV_L298N
-  Serial.println(F("L298N (ENA D9, IN1 D6, IN2 D5)"));
+  Serial.print(F("L298N channel "));
+  Serial.print(L298N_CHANNEL);
+  Serial.print(F(" -- EN D")); Serial.print(PIN_ENA);
+  Serial.print(F(", IN D")); Serial.print(PIN_IN1);
+  Serial.print(F(" / D")); Serial.println(PIN_IN2);
 #else
   Serial.println(F("HW-039 (RPWM D9, LPWM D10, EN D8)"));
 #endif
@@ -1335,11 +1661,24 @@ void setup() {
   Serial.println(F("the supply is limiting and the motor is not getting 24 V."));
   Serial.println(F("Bare Enter stops. Use it whenever anything looks wrong."));
   Serial.println();
+  // Booting into a thrown kill switch must not look like a healthy start. The
+  // same latch applies, so it takes a release and a 'k' to arm, exactly as it
+  // would have mid-run.
+  if (killAsserted()) {
+    g_killLatched = true;
+    g_state = ST_FAULT;
+    g_fault = FAULT_KILLED;
+    Serial.println(F("KILL SWITCH is thrown at boot. Nothing will move until"));
+    Serial.println(F("it is released and 'k' is typed."));
+    Serial.println();
+  }
+
   printHelp();
 }
 
 void loop() {
   pollSerial();
+  serviceInputs();
   updateMotion();
   lcdUpdate(millis());
 }
