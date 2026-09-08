@@ -164,10 +164,13 @@ deleted in favour of `actuator_v1/`. So the serial side currently cannot be
 exercised without a real Arduino and a real actuator. (The old simulator is
 recoverable from git history if that becomes painful.)
 
-The pointing math has its own test, which needs no hardware at all:
+The pointing math has its own test, which needs no hardware at all — and no
+`pyserial` either, so it runs on any interpreter you can find. 27/27 as of
+8 Sep 2026. There is no `python` on `PATH` on the build machine; ANSYS ships
+one that works:
 
 ```bash
-python test_geometry.py
+"/c/Program Files/ANSYS Inc/ANSYS Student/v261/optiSLang/lib/python3.10/python.exe" test_geometry.py
 ```
 
 ## Files

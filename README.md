@@ -147,20 +147,34 @@ Neither of these should be touched before the calibration lands.
 rationale is worth keeping and lives in [docs/design-notes.md](docs/design-notes.md)
 and in the sketch's own comments.
 
-**`host/`** — Python yaw pointing over USB. **Never executed** — there is still
-no Python on the build machine. `test_geometry.py` now carries about thirty
-tests with a standalone runner and has never been invoked; running it is the
-cheapest action available in this repo.
+**`host/`** — Python yaw pointing over USB. The **pointing math now runs and
+passes**, 27/27, on 8 Sep 2026 — the first time any of it had been executed.
+The serial half is still untouched: there is no `pyserial` installed, and no
+Arduino has ever answered this program.
 
-> **The count-origin defect is fixed, but unrun.** It was worse than previously
-> recorded: not only did `host/README.md` claim homing gives `counts_a = 0`,
-> but `TriangleLinkage` hardcoded the same assumption, treating count zero as
-> the retract stop. Under `ORIGIN_AT_MIDPOINT 1` (the shipped default) homing
-> lands at `-(travel/2)`, so the model was asking about a point half a stroke
-> away. It now takes `counts_at_retract` and measures from there, mirroring
-> `degreesNow()` in the sketch. Six new tests cover it — **none of them have
-> been executed**, because there is no interpreter here. Install Python and
-> run `test_geometry.py` before trusting any of this.
+There is no Python on `PATH`, but there is one on the machine, bundled with
+ANSYS. No install, no admin rights:
+
+```
+"/c/Program Files/ANSYS Inc/ANSYS Student/v261/optiSLang/lib/python3.10/python.exe"
+```
+
+Python 3.10.19. Recorded because it took a search to find, and the supposed
+absence of an interpreter had been blocking the cheapest tests in the repo.
+
+> **The count-origin defect is fixed, and the fix is tested.** It was worse
+> than previously recorded: not only did `host/README.md` claim homing gives
+> `counts_a = 0`, but `TriangleLinkage` hardcoded the same assumption, treating
+> count zero as the retract stop. Under `ORIGIN_AT_MIDPOINT 1` (the shipped
+> default) homing lands at `-(travel/2)`, so the model was asking about a point
+> half a stroke away. It now takes `counts_at_retract` and measures from there,
+> mirroring `degreesNow()` in the sketch.
+>
+> What the placeholder cost, measured rather than argued: a plausible two-point
+> calibration sighted at 210° and 222°, entered with the config template's old
+> `counts_a: 0` instead of the homed `-348`, reads **20.88° off at the homed
+> position**. The dish beamwidth is a couple of degrees. That is not a tuning
+> error, it is a different piece of sky.
 
 ## `archive/`
 
