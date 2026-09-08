@@ -8,6 +8,72 @@ worth building until the count is trustworthy at 24 V through a real bridge
 under real load. `reed_switch_test/` is the main sketch and the only one that
 should be running right now.
 
+---
+
+## START HERE — where things were left, 8 Sep 2026
+
+### Physical state, as left
+
+- Rod is back at the **home mark**, trimmed to within a count.
+- Serial bridge closed, **COM3 free**. `reed_switch_test` is what is flashed.
+- Supply was 25 V limited to 2.5 A. **3 A is this supply's maximum**, and that
+  is the single largest caveat on every number below.
+
+### What was settled
+
+- **Linkage geometry is closed.** Pin-to-pin 513.390 mm, a = 310.000,
+  b = 310.111, θ₀ = 111.767°, 0.3295 °/mm at home. Exact to 0.12 µm once the
+  48 mm perpendicular offset at the bottom pin was accounted for.
+- **The phantom counts were PWM pickup** at 490.20 Hz — Timer1 on D10, the
+  enable pin — arriving on the reed line. 73% of counts at duty 200 were
+  phantom. Duty 255 stops switching entirely and is currently the *only*
+  honest counting condition. This explains the whole 4 Sep invalidated list.
+- **First trustworthy mm/count: ~0.229 mm/count extending**, at duty 255,
+  over a 30 mm span (±1.7%). About 0.076 °/count against the linkage.
+- **Host pointing math runs and passes**, 27/27 — the first execution in this
+  project's history. A count-origin defect was fixed; the old config
+  placeholder was worth 20.88° of pointing error.
+
+### What is still broken
+
+- **Retract loses counts.** 0.46 and 0.74 mm/count on consecutive runs
+  against extend's steady ~0.23. Out-and-back missed by 13 mm on a 10 mm
+  move. It is direction-dependent, not position-dependent, which points at
+  mechanical slip rather than the sensor. **Inferred, not observed.**
+- **The reed line needs an RC filter and a stronger pull-up.** Until then you
+  are locked to duty 255 with no speed control.
+- **Breakaway bracket (140, 200] is still open.** `SPEED_HOMING` is 150,
+  inside it. A correction that fails to start reads as a jam.
+
+### Do these next, in this order
+
+1. **Get a supply that reaches 8–10 A.** Cheapest way to remove the biggest
+   caveat. If the 2.5 A limit was feeding the retract asymmetry, the
+   diagnosis changes.
+2. **RC filter + stronger pull-up on the reed**, and check whether its cable
+   runs alongside the motor leads.
+3. **Confirm or kill the slip hypothesis** by feeling the actuator through a
+   loaded retract. If it judders, it is mechanical and no filter touches it.
+4. **Two compass sightings** — the last missing input. Full procedure in
+   [docs/bench-procedure-reed-trust.md](docs/bench-procedure-reed-trust.md),
+   section *Session 2*.
+5. **Walk the breakaway bracket.**
+
+### The three documents that matter
+
+| | |
+|---|---|
+| [calibration-2026-09-08.md](docs/calibration-2026-09-08.md) | the bench session: run log, both faults |
+| [linkage-geometry-2026-09-08.md](docs/linkage-geometry-2026-09-08.md) | CAD → triangle parameters, and the ceiling |
+| [bench-procedure-reed-trust.md](docs/bench-procedure-reed-trust.md) | what to run next time |
+
+**Do not open the actuator.** The reed and magnet are probably innocent.
+
+**Do not connect OUT1.** L298N channel A's high side is shorted on; the
+firmware parks D9/D6/D5 low to keep that fault inert.
+
+---
+
 ## The one job
 
 **Millimetres per reed count.** It is a property of the mechanism — motor
