@@ -129,10 +129,19 @@ class LinearLinkage:
     Straight line fit through two measured points.
 
     Calibration, which needs nothing but a compass:
-      1. Home the actuator ('h'). That is counts = 0.
+      1. Home the actuator ('h'), then read the position the sketch reports.
+         That is counts_a -- it is NOT necessarily zero. With
+         ORIGIN_AT_MIDPOINT the retract stop sits at -(travel/2).
       2. Sight the boom and write down the heading -> point A.
-      3. Drive out to some counts well along the stroke.
+      3. Drive out to some counts well along the stroke, and again read back
+         the position actually reached rather than the one you asked for: a
+         'g' target is clamped by SOFT_LIMIT_MARGIN, and a move may settle a
+         count or two short of it.
       4. Sight it again -> point B.
+
+    Both counts are inputs, so this model does not care where zero sits. It
+    only cares that the two counts you write down are the ones the sketch
+    reported, not the ones you intended.
 
     Good to a fraction of a degree over a modest arc, and it drifts from the
     truth as the arc widens. If the two calibration points bracket the arc you
@@ -187,13 +196,21 @@ class TriangleLinkage:
 
     Calibration needs a tape measure for a and b, plus mm_per_count from the
     bench test, plus one compass heading taken at the homed position.
+
+    Everything here is anchored to the RETRACT STOP, not to count zero. Those
+    are the same place only when the sketch is built with ORIGIN_AT_MIDPOINT
+    off; with it on -- the shipped default -- homing leaves the carriage at
+    -(travel/2), and assuming zero would put the model half a stroke out.
+    This mirrors degreesNow() in the sketch, which measures from
+    retractStopPos() for exactly the same reason.
     """
     pivot_to_base_mm: float          # a
     pivot_to_carriage_mm: float      # b
-    retracted_length_mm: float       # L at counts = 0 (i.e. homed)
+    retracted_length_mm: float       # L with the carriage at the retract stop
     mm_per_count: float              # from the sensor bench test
     angle_at_retract_deg: float      # measured heading with the actuator homed
     direction: int = 1               # +1 if extending increases heading, else -1
+    counts_at_retract: float = 0.0   # position the sketch reports once homed
 
     def __post_init__(self):
         if self.direction not in (1, -1):
@@ -224,17 +241,18 @@ class TriangleLinkage:
             raise LinkageError(
                 f"heading {angle_deg:.2f} deg is outside the arc this linkage can reach")
         length = self._length_for_theta(theta)
-        return (length - self.retracted_length_mm) / self.mm_per_count
+        extension_mm = length - self.retracted_length_mm
+        return self.counts_at_retract + extension_mm / self.mm_per_count
 
     def angle_for_counts(self, counts: float) -> float:
-        length = self.retracted_length_mm + counts * self.mm_per_count
-        theta = self._theta_for_length(length)
+        extension_mm = (counts - self.counts_at_retract) * self.mm_per_count
+        theta = self._theta_for_length(self.retracted_length_mm + extension_mm)
         return self.angle_at_retract_deg + self.direction * math.degrees(theta - self._theta0)
 
     def describe(self) -> str:
         return (f"triangle: a={self.pivot_to_base_mm:.0f} mm, "
                 f"b={self.pivot_to_carriage_mm:.0f} mm, "
-                f"L0={self.retracted_length_mm:.0f} mm, "
+                f"L0={self.retracted_length_mm:.0f} mm at {self.counts_at_retract:.0f} cts, "
                 f"{self.mm_per_count:.3f} mm/count, "
                 f"{self.angle_at_retract_deg:.2f} deg at home, dir={self.direction:+d}")
 
@@ -259,6 +277,7 @@ def make_linkage(spec: dict):
             mm_per_count=float(spec["mm_per_count"]),
             angle_at_retract_deg=float(spec["angle_at_retract_deg"]),
             direction=int(spec.get("direction", 1)),
+            counts_at_retract=float(spec.get("counts_at_retract", 0.0)),
         )
 
     raise LinkageError(f"unknown linkage model {model!r} -- use 'linear' or 'triangle'")

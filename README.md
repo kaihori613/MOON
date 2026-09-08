@@ -147,17 +147,20 @@ Neither of these should be touched before the calibration lands.
 rationale is worth keeping and lives in [docs/design-notes.md](docs/design-notes.md)
 and in the sketch's own comments.
 
-**`host/`** — Python yaw pointing over USB. **Never executed** — there is no
-Python on the build machine. `test_geometry.py` carries about twenty tests with
-a standalone runner and has never been invoked; running it is the cheapest
-action available in this repo.
+**`host/`** — Python yaw pointing over USB. **Never executed** — there is still
+no Python on the build machine. `test_geometry.py` now carries about thirty
+tests with a standalone runner and has never been invoked; running it is the
+cheapest action available in this repo.
 
-> **Open defect in `host/`.** `host/README.md` says homing gives `counts_a = 0`
-> and that `g 400` puts you at `counts_b = 400`. With `ORIGIN_AT_MIDPOINT 1`
-> (the shipped default) homing lands at `-(travel/2)`, and `g 400` is clamped by
-> the soft limit well short of 400. Two wrong numbers into a two-point fit. The
-> sketch is correct; the host document predates the midpoint origin. Fix before
-> calibrating the linkage.
+> **The count-origin defect is fixed, but unrun.** It was worse than previously
+> recorded: not only did `host/README.md` claim homing gives `counts_a = 0`,
+> but `TriangleLinkage` hardcoded the same assumption, treating count zero as
+> the retract stop. Under `ORIGIN_AT_MIDPOINT 1` (the shipped default) homing
+> lands at `-(travel/2)`, so the model was asking about a point half a stroke
+> away. It now takes `counts_at_retract` and measures from there, mirroring
+> `degreesNow()` in the sketch. Six new tests cover it — **none of them have
+> been executed**, because there is no interpreter here. Install Python and
+> run `test_geometry.py` before trusting any of this.
 
 ## `archive/`
 

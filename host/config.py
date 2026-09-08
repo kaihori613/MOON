@@ -43,10 +43,16 @@ TEMPLATE = {
     "linkage": {
         "_comment": "model is 'linear' (two measured points, no tape measure "
                     "needed) or 'triangle' (physically correct, needs the mount "
-                    "geometry). See host/README.md.",
+                    "geometry). Both counts below are positions READ BACK from "
+                    "the sketch, not positions you asked for. See "
+                    "host/README.md.",
         "model": "linear",
         "angle_a_deg": None,
-        "counts_a": 0,
+        # Not 0. Homing does not land on zero when the sketch is built with
+        # ORIGIN_AT_MIDPOINT -- it lands on -(travel/2) -- and a plausible
+        # placeholder that silently validates is exactly the failure the site
+        # coordinates above are left blank to avoid.
+        "counts_a": None,
         "angle_b_deg": None,
         "counts_b": None,
     },

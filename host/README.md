@@ -63,11 +63,19 @@ The program needs to convert a heading into reed counts. Two models, picked by
 
 ### `linear` — start here
 
-Two measured points, no tape measure:
+Two measured points, no tape measure. **Both counts are positions the sketch
+reports back, never positions you asked for:**
 
-1. Home the actuator (`h` in the Arduino console). That is `counts_a = 0`.
+1. Home the actuator (`h` in the Arduino console), then read the position it
+   prints → `counts_a`. With `ORIGIN_AT_MIDPOINT` — the shipped default —
+   that is `-(travel/2)`, not zero. A plain `h` before any `c` calibration
+   does put zero at the retract stop, so this number tells you which of the
+   two you are in.
 2. Sight along the boom, read the heading → `angle_a_deg`.
-3. Drive well along the stroke, e.g. `g 400` → `counts_b = 400`.
+3. Drive well along the stroke, e.g. `g 400`, then read the position it
+   settled at → `counts_b`. Do not assume 400: `g` clamps to
+   `SOFT_LIMIT_MARGIN` off each stop, and a move may finish a count or two
+   short of its target.
 4. Sight it again → `angle_b_deg`.
 
 Accurate to a fraction of a degree if your two points bracket the arc you
@@ -86,9 +94,21 @@ Needs real measurements, and is worth it if yaw sweeps a wide arc:
 | `mm_per_count` | from the sensor bench test: stroke length ÷ total counts |
 | `angle_at_retract_deg` | heading measured with the actuator homed |
 | `direction` | `+1` if extending increases heading, `-1` if it decreases |
+| `counts_at_retract` | position the sketch reports once homed (default `0`) |
 
-Note `mm_per_count` comes from `actuator_sensor_bench_test` — which has not
-been run yet, so the triangle model cannot be calibrated until it has.
+The last one is the same trap as `counts_a` above. This model is anchored to
+the **retract stop**, not to count zero, and those are the same place only
+with `ORIGIN_AT_MIDPOINT` off. Leave it at `0` under the shipped default and
+the model is asking about a point half a stroke away — 174 mm out, on a
+different part of the arc. It mirrors `degreesNow()` in the sketch, which
+measures from `retractStopPos()` for the same reason.
+
+Note `mm_per_count` comes from `reed_switch_test`, and as of the bench session
+of 4 Sep 2026 **it does not yet exist as a trustworthy number**: reed counts
+did not map consistently to distance, disagreeing by 7.5× across two steps of
+the same run at the same physical speed. Until that is resolved the triangle
+model cannot be calibrated, because its one sensor-derived input is the one
+that is wrong. See [docs/calibration-2026-09-04.md](../docs/calibration-2026-09-04.md).
 
 ### Compass headings
 

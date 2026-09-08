@@ -117,9 +117,12 @@ def run_auto_cycle(link: ActuatorLink, cfg: Config, linkage, force_home: bool):
                             on_progress=lambda s: _progress(f"  homing  pos={s['pos']}"))
         print(f"\r  homed at pos={st['pos']}" + " " * 20)
     else:
-        # actuator_v1 does not persist position, so it always boots un-homed and
-        # this branch never fires against it. Kept because it costs nothing and
-        # a later sketch may well restore a saved origin.
+        # actuator_v1 does persist position to EEPROM, but deliberately does not
+        # use it to skip homing: a saved position is silently wrong exactly when
+        # something back-drove the dish while the power was off, and that failure
+        # has no symptom. It homes every boot and uses the saved number only to
+        # report drift. So this branch never fires against it. Kept because it
+        # costs nothing and a later sketch may trust a saved origin.
         print(f"  already homed, pos={st['pos']}")
 
     counts, az, el, info = compute_target(cfg, linkage)

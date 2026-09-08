@@ -180,6 +180,90 @@ def test_triangle_rejects_impossible_geometry():
     raise AssertionError("a 5000 mm side cannot close a 400/350 triangle")
 
 
+# --- triangle linkage, midpoint origin -------------------------------------
+#
+# The sketch ships with ORIGIN_AT_MIDPOINT, so homing leaves the carriage at
+# -(travel/2) rather than at zero. These pin the model to the retract STOP
+# instead of to the number zero. A 697-count travel is the figure measured on
+# 4 Sep 2026, so home reports -348.
+
+def _midpoint_triangle():
+    return TriangleLinkage(pivot_to_base_mm=400.0,
+                           pivot_to_carriage_mm=350.0,
+                           retracted_length_mm=300.0,
+                           mm_per_count=0.5,
+                           angle_at_retract_deg=180.0,
+                           direction=1,
+                           counts_at_retract=-348.0)
+
+
+def test_midpoint_triangle_is_the_identity_at_the_retract_stop():
+    """Home reports -348, and that is where angle_at_retract_deg applies."""
+    link = _midpoint_triangle()
+    assert abs(link.angle_for_counts(-348.0) - 180.0) < 1e-9
+    assert abs(link.counts_for_angle(180.0) - (-348.0)) < 1e-9
+
+
+def test_midpoint_triangle_round_trips():
+    link = _midpoint_triangle()
+    for counts in (-348.0, -300.0, -100.0, 0.0, 200.0):
+        angle = link.angle_for_counts(counts)
+        assert abs(link.counts_for_angle(angle) - counts) < 1e-6, counts
+
+
+def test_counts_at_retract_is_a_pure_translation():
+    """
+    Shifting the origin must move the count axis and nothing else. Same
+    physical place, same heading, whichever origin the sketch was built with.
+    """
+    zero_origin = _triangle()
+    midpoint = _midpoint_triangle()
+    for extension_counts in (0.0, 50.0, 200.0, 400.0):
+        a = zero_origin.angle_for_counts(extension_counts)
+        b = midpoint.angle_for_counts(extension_counts - 348.0)
+        assert abs(a - b) < 1e-9, (extension_counts, a, b)
+
+
+def test_assuming_zero_is_home_is_materially_wrong():
+    """
+    The defect this parameter exists to prevent, stated as a number. Reading
+    the homed position as 0 when it is really -348 does not shift the heading
+    slightly -- it asks the model about a point 174 mm further out, which is a
+    different part of the arc entirely.
+    """
+    link = _midpoint_triangle()
+    correct = link.angle_for_counts(-348.0)
+    if_zero_assumed = link.angle_for_counts(0.0)
+    assert abs(correct - if_zero_assumed) > 5.0, (correct, if_zero_assumed)
+
+
+def test_factory_passes_counts_at_retract_through():
+    link = make_linkage({
+        "model": "triangle",
+        "pivot_to_base_mm": 400.0,
+        "pivot_to_carriage_mm": 350.0,
+        "retracted_length_mm": 300.0,
+        "mm_per_count": 0.5,
+        "angle_at_retract_deg": 180.0,
+        "direction": 1,
+        "counts_at_retract": -348.0,
+    })
+    assert abs(link.angle_for_counts(-348.0) - 180.0) < 1e-9
+
+
+def test_factory_defaults_counts_at_retract_to_zero():
+    """Omitting it must keep the pre-midpoint behaviour for existing configs."""
+    link = make_linkage({
+        "model": "triangle",
+        "pivot_to_base_mm": 400.0,
+        "pivot_to_carriage_mm": 350.0,
+        "retracted_length_mm": 300.0,
+        "mm_per_count": 0.5,
+        "angle_at_retract_deg": 180.0,
+    })
+    assert abs(link.angle_for_counts(0.0) - 180.0) < 1e-9
+
+
 # --- resolution ------------------------------------------------------------
 
 def test_degrees_per_count_is_positive_and_small():
