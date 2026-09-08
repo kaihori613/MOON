@@ -1,5 +1,14 @@
 # Bench procedure — is the reed count a distance sensor?
 
+> **Tests 1–3 were run on 8 Sep 2026 and the question is answered.** Results
+> in [calibration-2026-09-08.md](calibration-2026-09-08.md). Test 1 was
+> impossible (the actuator will not back-drive), Test 2 found PWM pickup at
+> 490.20 Hz and a second direction-dependent fault under it, and Test 3 was
+> cancelled — the reed and magnet are probably innocent, so the actuator
+> should not be opened. They are kept below as the record of how it was
+> found. **The live procedure is [Session 2](#session-2--two-compass-sightings)
+> at the end.**
+
 Written 8 Sep 2026, to be run at the bench. One question, three tests, in
 increasing order of cost. Stop as soon as one of them answers.
 
@@ -150,3 +159,78 @@ gain 76.707 mm over a 77 mm stroke. See
 [linkage-geometry-2026-09-08.md](linkage-geometry-2026-09-08.md).
 
 Everything else in the pointing chain is already done and waiting on this.
+
+---
+
+# Session 2 — two compass sightings
+
+The last missing input. Everything measured on 8 Sep was rod millimetres; no
+heading has ever been taken. Two sightings convert counts straight to degrees
+via `LinearLinkage`, which needs no `mm_per_count`, no triangle and no
+geometry — just two points.
+
+## Do these first, in this order
+
+1. **A supply that reaches 8–10 A.** Every number from 8 Sep was taken at a
+   2.5 A limit against a documented 8–10 A requirement. This is the largest
+   caveat on all of it, and if the limit was contributing to the retract
+   asymmetry then the diagnosis itself changes. Cheapest doubt to remove.
+2. **RC filter and stronger pull-up on the reed line**, and check whether its
+   cable shares a bundle or connector shell with the motor leads. Without
+   this you are locked to duty 255 — the only condition with no PWM carrier —
+   and you have no speed control at all.
+3. **Confirm or kill the slip hypothesis.** Watch and feel the actuator
+   through a loaded retract. If it judders, that is the answer and it is a
+   mechanical repair, not a filter. This was inferred from count behaviour on
+   8 Sep and never observed directly.
+
+## The sighting itself
+
+Only the **extend** direction counts honestly, so both legs are extends.
+
+1. Home the actuator, or start from a marked position you can return to.
+2. **Sight the boom and record the heading.** Take the bearing two or three
+   times and average — see the compass notes below.
+3. Extend by count over as large a span as the stroke allows. The full usable
+   travel is about 77 mm, roughly 32°.
+4. **Sight again and record.** Same technique, same standing position.
+5. The two `(counts, heading)` pairs are `counts_a / angle_a_deg` and
+   `counts_b / angle_b_deg` in `host/config.json`. Set
+   `headings.magnetic: true` and your local `declination_deg`.
+
+## Compass technique — the two things that matter
+
+**Use the biggest span you can.** A handheld compass reads to perhaps ±1–2°.
+Over an 11° step that is ±20% on the slope, which is worse than no
+measurement. Over the full ~32° it is about ±5%.
+
+**Keep the compass away from the structure.** A large steel dish frame, a DC
+motor and the actuator's own position magnet will all pull a needle. Sight
+along the boom from several feet back, or take a bearing to a distant
+landmark instead of reading beside the metal.
+
+The second matters less than it appears, and it is worth knowing why: a
+**constant** error — declination, local deviation, a consistent parallax in
+how you sight — **cancels out of the slope entirely**, because the fit uses
+the difference between the two readings. The absolute offset is then absorbed
+by the manual trim you would peak on signal anyway. Only random scatter
+between the two readings hurts, which is the argument for averaging each one.
+
+## The cross-check
+
+The linkage geometry predicts **0.0755 °/count** near home, from
+513.390 mm pin-to-pin and ~0.23 mm/count measured on 8 Sep. If the sighting
+fit lands near that, then CAD, linkage math, rod measurement and compass all
+corroborate through independent routes, and the pointing model is real rather
+than merely self-consistent.
+
+If they disagree badly, that is worth knowing before anything is built on it.
+
+## Also while you are there
+
+**Close the breakaway bracket** — still not done. The actuator did not move
+from rest at duty 140 and moved cleanly at 200, so breakaway is somewhere in
+(140, 200] and every speed constant inside that bracket is provisional.
+`SPEED_HOMING` is **150**. If that is below breakaway, homing fails to start
+and the stall watchdog reports it as a jam. Walk `w` up from 140 in steps of
+10 and note the first duty that reliably breaks away in both directions.
