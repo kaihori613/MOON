@@ -1592,6 +1592,18 @@ void setup() {
   pinMode(PIN_ENA, OUTPUT);
   pinMode(PIN_IN1, OUTPUT);
   pinMode(PIN_IN2, OUTPUT);
+
+  #if L298N_CHANNEL == 2
+  // Park the dead channel before anything else. Its pins are not merely
+  // unused: left as floating inputs, ENA can drift high while IN1 drifts low,
+  // which turns OUT1's LOW side on underneath a high side that is already
+  // shorted hard on. That is a dead short from the 24 V rail to ground through
+  // the die, and it would take channel B with it. Held low, the low sides stay
+  // off and the fault stays inert -- provided OUT1 is left unconnected.
+  pinMode(9, OUTPUT); digitalWrite(9, LOW);   // ENA
+  pinMode(6, OUTPUT); digitalWrite(6, LOW);   // IN1
+  pinMode(5, OUTPUT); digitalWrite(5, LOW);   // IN2
+  #endif
 #else
   pinMode(PIN_RPWM, OUTPUT);
   pinMode(PIN_LPWM, OUTPUT);

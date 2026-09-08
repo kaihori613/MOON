@@ -19,7 +19,13 @@
   //
   // Both channels share one die and one heat slug, so B has run as hot as A
   // did. This is a spare, not a repair.
-  #define L298N_CHANNEL 1
+  // Channel A is now DEAD, and dangerously so: OUT1's high-side is shorted on.
+  // It measured 20 V driving extend, held ~20 V after motorOff(), and dropped
+  // to 0 V only when the opposite command raised OUT2 to match it. A motor that
+  // keeps turning after the firmware has cut it, and that no kill switch can
+  // stop -- because the kill switch only asks the firmware to call motorOff(),
+  // which is the call being ignored. Do not put this back to 1.
+  #define L298N_CHANNEL 2
 
   #if L298N_CHANNEL == 1
     const uint8_t PIN_ENA = 9;    // ENA
