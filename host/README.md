@@ -90,11 +90,18 @@ Needs real measurements, and is worth it if yaw sweeps a wide arc:
 |---|---|
 | `pivot_to_base_mm` | pivot centre to the actuator's fixed mount |
 | `pivot_to_carriage_mm` | pivot centre to the actuator's moving mount |
-| `retracted_length_mm` | mount-to-mount distance with the actuator homed |
+| `retracted_length_mm` | **pin-to-pin** distance with the actuator homed |
 | `mm_per_count` | from the sensor bench test: stroke length ÷ total counts |
 | `angle_at_retract_deg` | heading measured with the actuator homed |
 | `direction` | `+1` if extending increases heading, `-1` if it decreases |
 | `counts_at_retract` | position the sketch reports once homed (default `0`) |
+
+**Both length keys mean pin-to-pin, not the actuator's own axial length.** On
+this machine the bottom pin joint is offset 48 mm perpendicular to the rod,
+which makes those two distances differ by 2.249 mm at home and makes them
+extend at slightly different rates — the pins gain 76.707 mm over a 77 mm
+stroke. Measure the joints, not the tube. See
+[docs/linkage-geometry-2026-09-08.md](../docs/linkage-geometry-2026-09-08.md).
 
 The last one is the same trap as `counts_a` above. This model is anchored to
 the **retract stop**, not to count zero, and those are the same place only

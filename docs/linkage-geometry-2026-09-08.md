@@ -1,106 +1,148 @@
 # Linkage geometry from CAD — 8 Sep 2026
 
 Source: SolidWorks sketch of the actuator–antenna system at the **home
-position**, supplied 8 Sep 2026. This is the `triangle` model's tape-measure
-input — the half of the pointing chain that was never blocked by the reed
-sensor.
+position**, plus a photograph of the mounted assembly, supplied 8 Sep 2026.
+This is the `triangle` model's tape-measure input — the half of the pointing
+chain that was never blocked by the reed sensor.
 
-## What the sketch gives directly
+**Status: resolved.** The geometry closes exactly. What remains missing is
+`mm_per_count`, which this document does not and cannot supply.
+
+## The pins
 
 Taking the top-right corner of the sketch as origin, +x right, +y up:
 
 | point | position | what it is |
 |---|---|---|
-| pin 1 | `(-288, 0)` | top-left pin joint |
-| pin 2 | `(0, -115)` | middle-right pin joint — **taken as the antenna pivot** |
-| pin 3 | `(0, -425)` | bottom-right pin joint (115 + 310 below the corner) |
+| pin 1 | `(-288, 0)` | top-left pin joint, on the dish rib |
+| pin 2 | `(0, -115)` | middle-right pin joint — the antenna **pivot** |
+| pin 3 | `(0, -425)` | bottom-right pin joint, on the mast bracket |
 
-Stated separately: the actuator measures **511.141 mm** pin to mount at home,
-with **252** and **173.5** marked along it and **48** at the bottom.
+## The 48 mm offset, and why it looked like an error
 
-## The one inconsistency
+The sketch's `288 / 115 / 310` put pins 1 and 3 exactly **513.390 mm** apart,
+while the actuator was given as **511.141 mm** — a 2.249 mm gap that was too
+large to be rounding on a three-decimal driven dimension.
 
-`288 / 115 / 310` put pins 1 and 3 exactly **513.390 mm** apart. The stated
-actuator length is **511.141 mm**. The gap is **2.249 mm (0.44%)**.
+It is not an error. The actuator's bottom pin joint is offset
+**perpendicular to the actuator axis by 48 mm**: the rod's line of action
+passes to one side of the bolt it pivots on, which is visible in the
+photograph as the bracket clamped to the mast pipe. So the two lengths are
+the legs and hypotenuse of a right triangle:
 
-That is too large to be rounding — 511.141 carries three decimals, so it is a
-driven dimension and should be exact — and too small to be a misread
-dimension. The unaccounted **48 mm** at the bottom of the sketch is the
-obvious suspect, and it does reconcile: a point 48 mm from pin 3, offset
-about 42 mm left and 23 mm down, sits exactly 511.141 mm from pin 1. That
-matches the sketch, where the diagonal visibly terminates left of and below
-the bottom pin before a short segment closes to it.
+```
+sqrt(511.141² + 48²) = 513.3898 mm
+sqrt(288²     + 425²) = 513.3897 mm
+                        ---------
+             residual = 0.12 microns
+```
 
-But it means the actuator's lower end is **not** the circled pin joint, which
-contradicts "all the circles are pinjoint". Unresolved — see *Next*.
+That is an exact reconciliation, not a plausible one. Both readings of the
+sketch are correct and they describe different distances:
 
-## Three candidate readings
+- **511.141 mm** is the actuator's own axial length, rod end to mount.
+- **513.390 mm** is the pin-to-pin distance.
 
-Pivot is pin 2 in all three. `a` and `b` are symmetric in the law of cosines,
-so it does not matter which end of the actuator is fixed and which moves —
-that only sets `direction`, and the bench settles it.
+**The triangle model wants the pin-to-pin distance.** Kinematics are set by
+where the joints are, not by where the tube runs.
 
-| | a | b | L0 | θ₀ | ceiling | arc over 77 mm | °/mm at home |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| **A** ends at circled pins | 310.111 | 310.000 | 513.390 | 111.767° | +106.7 mm | 32.611° | 0.3295 |
-| **B** stated length forced | 310.111 | 310.000 | 511.141 | 111.030° | +108.970 mm | 32.014° | 0.3264 |
-| **C** lower end 48 mm off pin | 310.111 | 335.741 | 511.141 | 104.567° | +134.711 mm | 26.581° | 0.2906 |
+## Parameters
 
-A ignores the stated length. B forces it and leaves 2.249 mm unexplained. C
-reconciles everything but moves the attachment off the circled pin.
+| key | value | source |
+|---|---:|---|
+| `pivot_to_base_mm` | **310.000** | pin 2 → pin 3, given directly |
+| `pivot_to_carriage_mm` | **310.111** | pin 2 → pin 1 = √(288² + 115²) |
+| `retracted_length_mm` | **513.390** | pin 1 → pin 3 at home — *not* 511.141 |
+| `angle_at_retract_deg` | — | bench: sight the boom with the actuator homed |
+| `direction` | — | bench: `+1` if extending increases heading |
+| `counts_at_retract` | — | bench: position the sketch reports after `h` |
+| `mm_per_count` | — | **blocked** on the reed sensor |
 
-## What holds regardless of which is right
+`a` and `b` are symmetric in the law of cosines, so it does not matter which
+end of the actuator is fixed and which moves. That only sets `direction`, and
+the bench settles it.
 
-**There is a hard geometric ceiling on extension.** At `L = a + b` the three
-pins go collinear and the triangle cannot close; past that the model raises
-`LinkageError` and the mechanism itself would jam or invert. The ceiling sits
-between **+107 mm and +135 mm** of extension from home on all three readings.
-Something must stop the actuator before it. This is a mechanical limit, not a
-software one, and no firmware constant currently encodes it.
+Derived:
 
-**The 4 Sep bench travel is independently corroborated.** That session
-measured 77 mm from home to the extend hard stop. All three readings admit
-77 mm comfortably, with 30–58 mm of margin to the singularity. Two
-independent methods — a ruler on the rod, and CAD geometry — now agree, and
-neither depends on the reed count.
+| quantity | value |
+|---|---:|
+| included angle at the pivot, θ₀ | **111.767°** |
+| geometric ceiling (pins collinear at `a + b` = 620.111) | **+106.721 mm** pin-to-pin |
+| the same ceiling in rod travel | **+107.11 mm** |
+| arc swept over the 77 mm measured stroke | **32.611°** |
+| angular resolution at home | **0.3295 °/mm** |
+| angular resolution at full extension | ~0.58 °/mm |
 
-**252 mm and 173.5 mm cannot be the stroke.** Both exceed the ceiling on
-every reading; the triangle cannot close at either. They must be internal
-actuator dimensions — body length, exposed rod at home, or similar — not
-travel. This also settles a contradiction in
-[calibration-2026-09-04.md](calibration-2026-09-04.md), which recorded "full
-stroke, retract limit to extend limit, is therefore about 328 mm". **That
-line is wrong.** 328 mm was the exposed rod length at full extension, not the
-stroke; a 328 mm stroke is geometrically impossible in this linkage. The
-77 mm figure in the same document is the good one.
+## The calibration trap this creates
 
-**Angular resolution is roughly 0.3°/mm at home**, improving to about
-0.58°/mm at full extension as the linkage opens up. Over the 77 mm stroke the
-dish sweeps **27–33°**, which is ample for a fixed geostationary target.
+Because the offset makes the actuator the *leg* and the pin-to-pin span the
+*hypotenuse*, the two do not extend at the same rate:
 
-## What this does NOT unblock
+| rod extension | pin-to-pin gain | ratio |
+|---:|---:|---:|
+| +20 mm | 19.916 mm | 0.99594 |
+| +40 mm | 39.837 mm | 0.99623 |
+| +77 mm | 76.707 mm | 0.99669 |
 
-`mm_per_count` is still missing, and it is still the only sensor-derived
-input to the triangle model. The geometry above converts millimetres to
-degrees; nothing here converts reed counts to millimetres. That remains
-blocked on the reed/magnet inspection.
+Over the full 77 mm stroke the pins gain **76.707 mm, not 77.000** — short by
+0.293 mm, or **0.38%**.
 
-So the chain now stands:
+So when `mm_per_count` is finally measured, it matters *which distance was
+put on the ruler*. Measuring exposed rod against counts yields millimetres of
+**rod**, and feeding that straight into the triangle model overstates the
+angle by about 0.38%, or roughly **0.12° across the stroke**. Either measure
+pin-to-pin directly, or scale a rod-derived figure by ~0.9963.
+
+0.12° is currently far below the sensor problem and below backlash, so this
+is recorded rather than corrected. `TriangleLinkage` does not model the
+offset; it assumes pin-to-pin length is linear in counts. That assumption is
+right to 0.1% over this stroke and is not worth a parameter today.
+
+## What this settles elsewhere
+
+**The 4 Sep travel figure is independently corroborated.** That session
+measured 77 mm from home to the extend hard stop with a ruler. CAD admits
+77 mm with 29.7 mm of margin to the singularity. Two independent methods
+agree, and neither depends on the reed count.
+
+**The 4 Sep stroke figure is wrong.**
+[calibration-2026-09-04.md](calibration-2026-09-04.md) records "full stroke,
+retract limit to extend limit, is therefore about 328 mm". A 328 mm stroke is
+geometrically impossible here — the triangle cannot close past +107 mm. 328 mm
+was the exposed rod length at full extension, mislabelled as travel. The
+77 mm figure in that same document is the good one.
+
+**252 mm and 173.5 mm are not the stroke either.** Both exceed the ceiling.
+They are internal actuator dimensions — body length, exposed rod at home, or
+similar. Still worth confirming which is which, and note the supplied
+description said "511.141 − 153.5" where the sketch reads 173.5.
+
+## The ceiling is a real mechanical limit
+
+At `L = a + b` the three pins go collinear. Past that the triangle cannot
+close: `TriangleLinkage` raises `LinkageError`, and the mechanism itself
+would jam or snap through. That wall sits at **+107 mm of rod extension from
+home**, and the extend cam stops the actuator at +77 mm — so the machine as
+built is safe, with about 30 mm to spare.
+
+Nothing in the firmware encodes this. `SOFT_LIMIT_MARGIN` is denominated in
+counts off the *measured* stops, so it inherits the protection only as long
+as the cam keeps stopping the rod at +77 mm. A cam adjustment, a different
+actuator, or a re-drilled bracket removes it silently.
+
+## Chain status
 
 | link | state |
 |---|---|
 | counts → mm | **blocked** — 7.5× inconsistency, 4 Sep |
-| mm → geometry | **measured** — this document |
+| mm → geometry | **measured and closed** — this document |
 | geometry → degrees | **fixed and tested** — 27/27, 8 Sep |
 
 ## Next
 
-1. Resolve A / B / C. The question is narrow: does the actuator's lower rod
-   end attach at the circled bottom pin joint, or at a point about 48 mm from
-   it? The spread is 7.2° in θ₀ and about 6° in swept arc — the first is
-   absorbed by sighting `angle_at_retract_deg` on the bench, the second is
-   not, and shows up as pointing error away from the calibration points.
-2. Confirm what 252 and 173.5 measure. Neither is the stroke. Note the
-   supplied description said "511.141 − 153.5" while the sketch reads 173.5.
-3. Measure the geometric ceiling against the extend cam position, and decide
-   whether `SOFT_LIMIT_MARGIN` needs to encode it.
+1. Confirm what 252 and 173.5 measure, and whether it is 173.5 or 153.5.
+   Neither is stroke, so nothing downstream waits on it.
+2. Reed and magnet inspection. It is the only thing between here and a
+   calibrated pointing model.
+3. When `mm_per_count` is measured, denominate it in pin-to-pin millimetres
+   per the trap above.
