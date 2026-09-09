@@ -175,6 +175,77 @@ class ActuatorLink:
     def move_to(self, counts: int):
         self._write(f"g {int(round(counts))}")
 
+    def read_gravity(self, timeout: float = 5.0):
+        """Ask the IMU for one averaged, quality-gated gravity vector.
+
+        Returns (x, y, z, ok) or None if the sketch has no IMU. The sketch
+        refuses this while the motor is running -- an accelerometer under
+        power measures the motor, not the sky -- so call it from idle.
+        """
+        self._drain()
+        self._write("m")
+
+        deadline = time.time() + timeout
+        vec = None
+        while time.time() < deadline:
+            line = self._readline()
+            if line is None:
+                continue
+            if "no IMU" in line or "not while it is moving" in line:
+                return None
+            if line.strip().startswith("g = ["):
+                body = line.split("[", 1)[1].split("]", 1)[0]
+                parts = body.split()
+                if len(parts) == 3:
+                    try:
+                        vec = (float(parts[0]), float(parts[1]), float(parts[2]))
+                    except ValueError:
+                        return None
+                # The verdict, if any, is on a following line.
+                continue
+            if vec is not None and "REJECTED" in line:
+                return (vec[0], vec[1], vec[2], False)
+            if vec is not None and (line.startswith("pos=") or line == ""):
+                break
+        if vec is None:
+            return None
+        return (vec[0], vec[1], vec[2], True)
+
+    def declare_position(self, counts: int):
+        """Tell the sketch where it actually is, having worked it out from
+        gravity up here. This is what replaces homing into the cam."""
+        self._write(f"P {int(round(counts))}")
+
+    def stream_command(self, command: str, done_marker: str,
+                       timeout: float = 3600.0, quiet_timeout: float = 120.0):
+        """Run a long-running console command, yielding every line it prints.
+
+        Stops at `done_marker`, at `timeout` overall, or after `quiet_timeout`
+        with nothing arriving at all. The sweep is step/stop/read and can run
+        for many minutes, so the quiet timeout has to be generous enough to
+        cover one whole leg plus its settle.
+        """
+        self._drain()
+        self._write(command)
+
+        deadline = time.time() + timeout
+        last = time.time()
+        while time.time() < deadline:
+            line = self._readline()
+            if line is None:
+                if time.time() - last > quiet_timeout:
+                    raise ActuatorError(
+                        f"nothing from the controller for {quiet_timeout:.0f}s "
+                        f"while running {command!r}")
+                continue
+            last = time.time()
+            yield line
+            if done_marker and done_marker in line:
+                return
+            if "FAULT:" in line:
+                raise ActuatorFault(f"{line.strip()} (while running {command!r})")
+        raise ActuatorError(f"{command!r} did not finish within {timeout:.0f}s")
+
     # --- waiting -----------------------------------------------------------
 
     def wait_idle(self, timeout: float = 180.0, on_progress=None) -> dict:

@@ -16,7 +16,9 @@ is the first sketch here that does; that part has not been on hardware yet.
 | `reed_switch_test/` | **Run on hardware, sensor is clean.** The timed run added since is unrun |
 | `l298n_test/`, `actuator_test/` | **Bring-up. The motor turned.** Superseded by `actuator_v1/` |
 | `actuator_v1/` | **Compiles clean, 63% flash / 17% RAM on a 328P. Never run.** |
-| Host yaw pointing | Written, never executed — no Python on the build machine yet |
+| `actuator_v1/` IMU + buzzer | **Written, never compiled.** No `arduino-cli` on the machine it was written on |
+| Host yaw pointing | **`test_geometry.py` now passes, 21/21.** The serial path is still unrun |
+| Host axis fit | **`test_axis_fit.py` passes, 24/24**, and the CLI runs end to end on synthetic sweeps |
 
 An earlier lineage, `actuator_system/`, was deleted in favour of v1. It was
 written before any hardware existed and never ran, but it carried a simulator
@@ -197,6 +199,112 @@ circuit, which is the configuration `reed_switch_test/` could never test.
 The status line and the `s` / `h` / `c` / `g` / `k` / bare-Enter commands match
 what `host/link.py` already speaks, so the host code can point at v1 unchanged.
 
+## Pointing by gravity
+
+The single biggest change since the bench sketches. Homing into the retract cam
+is no longer how an absolute origin gets established.
+
+**Why gravity and not a compass.** The yaw axis on this mount is *tilted* — a
+TVRO polar mount points its axis at the celestial pole, so at Davis it sits
+about 51.5° off vertical. Rotating about a tilted axis tilts the dish, and an
+accelerometer measures tilt directly. In the sensor's own frame the gravity
+vector traces a **circle** as the dish sweeps; the plane of that circle is
+perpendicular to the rotation axis, and the angle around it is yaw, 1:1.
+
+Error propagates as `sigma_yaw = sigma_tilt / sin(gamma)`, where gamma is the
+angle between the axis and gravity. At Davis that is a 1.28× penalty, so 0.1°
+of tilt noise costs 0.13° of yaw.
+
+**What the budget actually is.** The 8 ft dish at 1694 MHz has a 5.08° beam:
+
+| off boresight | loss |
+|---|---|
+| 0.5° | 0.12 dB |
+| 1.0° | 0.46 dB |
+| 2.0° | 1.86 dB |
+| 2.54° | 3.00 dB |
+
+So the working budget is about **1°**, and every magnetometer in the parts
+drawer — the MMC5603, the GY-271, the MPU-9150's own AK8975 — misses it. Not
+because they are bad parts: an 8 ft steel reflector is an enormous soft-iron
+distorter, and while it rotates *with* the sensor (so an ellipsoid fit removes
+it) the pier does not. The pier stays fixed in the earth frame while the sensor
+sweeps through it, leaving a heading-dependent residual no static calibration
+can reach. Gravity has no such problem. Keep the magnetometers for a mount
+whose axis is vertical, where gravity has nothing to say.
+
+**The absolute anchor is the SDR, not a compass.** The fit knows where the dish
+points relative to itself. Tying that to the sky takes one peak on GOES-18,
+stored as the trim — a better absolute reference than any magnetometer, and
+already what `host/` does.
+
+### Sweep length is the thing that matters
+
+Fitting a circle to a **short arc** is famously ill-posed: over a few degrees an
+arc is nearly a straight line, and a straight line lies in many planes. The
+plane normal is the rotation axis, and yaw is arc length over radius — so a
+short sweep mis-scales every angle derived from it. It fails *quietly*: the
+wrong circle still passes through every point, so the residuals look fine.
+
+Measured over ~2700 synthetic sweeps (median of 21 seeds each):
+
+| arc swept | 0.2 mg noise | 1.0 mg noise |
+|---|---|---|
+| 10° | 2.2 % scale error | 76 % |
+| 16° | 0.7 % | 7.0 % |
+| 30° | 0.18 % | 1.1 % |
+| 60° | 0.04 % | 0.24 % |
+| 120° | 0.01 % | 0.06 % |
+
+**Sweep as much of the travel as you can.** Sagitta grows with the square of
+the arc while noise does not, so doubling the sweep is worth about four times
+as much as quartering the noise. `fit_axis` reports a `conditioning` number
+(sagitta over measured noise, both taken from the raw points so it stays honest
+when the fit is not) and refuses to quote an error bar below 25 — because below
+there the error stops merely growing and starts diverging, and an optimistic
+error bar exactly where the method collapses is worse than none.
+
+### On the bench
+
+```
+c                     home and learn the travel  (needed: the sweep uses it)
+w                     step, stop, settle, read -- one row per sample
+```
+
+Capture the console, then:
+
+```bash
+python calibrate_axis.py --from-log sweep.txt --save
+```
+
+The sweep is deliberately **step-stop-read**. An accelerometer cannot be read
+while the motor is running — it would measure the motor — and an 8 ft dish is a
+large sail, so every reading is averaged over 64 samples and gated on batch
+variance. Rows taken while the mount was moving are flagged and dropped.
+
+Set `IMU_SENSOR` in `Config.h`. Both the **MPU-9150** and the
+**FXOS8700** are supported behind one define, the same way `MOTOR_DRIVER` is.
+The FXOS8700's accel is 14-bit against the MPU's 16, so it loses on raw
+resolution — but resolution is not the limit here, noise and temperature drift
+are, and the NXP part is the quieter one. Bench them against each other and
+keep the winner; the temperature column in every sweep row exists for exactly
+that comparison.
+
+## The buzzer
+
+An active buzzer on **D7**, with **D4** held low next door so it plugs into two
+adjacent headers. It beeps on a finished move, on homing, on a captured
+calibration sample, and holds a long tone on a fault.
+
+This exists because the sweep has you standing at an 8 ft dish while the laptop
+is indoors. Everything it says could be read off the serial console instead, if
+you were in front of it. You are not. Idea taken from SARCnet's rotator, which
+beeps as it captures calibration extremes for the same reason.
+
+It is an **active** buzzer, not a passive one — it makes its own tone from DC,
+so driving it is a `digitalWrite`. Timer0 is `millis()`, Timer1 and Timer2 are
+motor PWM, and there is no spare timer to hand a `tone()` to.
+
 ### `host/`
 
 Python, runs on the PC over USB. Homes the actuator, computes where GOES-18 is
@@ -245,9 +353,15 @@ has finished moving and the landing reports lie to you.
 
 ## Known open issues
 
-- **Nothing in `host/` has ever been executed** — there is no Python on the
-  build machine. `test_geometry.py` was written alongside the math but has not
-  been run, so treat the pointing angles as unchecked until it passes.
+- **`actuator_v1/` has never been compiled since the IMU and buzzer went in.**
+  There is no `arduino-cli` on the machine this was written on. Brace and
+  preprocessor balance were checked by script and the register maps came from
+  the datasheets, but neither is a compiler and neither is silicon. Expect to
+  fix something on the first build.
+- The host serial path is still unrun. `link.py`'s new `read_gravity`,
+  `declare_position` and `stream_command` have no hardware behind them yet;
+  `calibrate_axis.py --from-log` is the tested path, and the live `--port`
+  path joins it only after the parse.
 - **End-stop repeatability has never been measured, and nothing here measures
   it any more.** The cams are now known to cut, which is what makes homing
   viable at all — but a cam that cuts reliably and a cam that cuts in the *same
@@ -262,7 +376,12 @@ has finished moving and the landing reports lie to you.
   the floor on pointing accuracy; if it turns out coarser than the link needs,
   the fix is a longer moment arm on the linkage, not software. `reed_switch_test/`
   measures it now — timed run, count the pulses, measure the rod, `m <mm>` —
-  but that has not been done yet.
+  but that has not been done yet. The gravity sweep below now gives
+  counts→degrees directly, which is what pointing actually needs, so
+  `mm_per_count` matters mainly to the triangle linkage model.
+- **The sweep must cover most of the travel.** See the arc-length table under
+  "Pointing by gravity" — a short sweep produces a confident-looking fit whose
+  angle scale is quietly wrong, and the residuals do not warn you.
 - Reed noise rejection is debounce-only, and the noise floor has only been
   measured with no bridge in the circuit — which is the one configuration where
   a clean result proves nothing. `actuator_v1/` carries the test over as `n` so
@@ -279,6 +398,13 @@ has finished moving and the landing reports lie to you.
   there is currently no way to exercise it without hardware.
 - **The degrees readout is uncalibrated and shows `?`.** `a`/`b` fix that in a
   couple of minutes with a compass, but it needs the actuator drivable first.
+  The gravity path (`w` then `calibrate_axis.py`) supersedes it and needs no
+  compass at all.
+- **Accelerometer temperature drift has not been measured**, and it is the
+  dominant real-world error in the gravity method. One mg of zero-g offset is
+  0.057° of tilt; a part drifting ~1 mg/°C over a 30 °C day/night swing would
+  eat most of the pointing budget. Every sweep row carries the die temperature
+  so the coefficient can be extracted; nobody has extracted it yet.
 - Flash sits at 63% with the LCD compiled out, 81% with it in. `Wire` and
   `snprintf`'s formatting machinery are most of that difference. Room to work
   either way, but not a lot once the display goes in.

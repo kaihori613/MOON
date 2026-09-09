@@ -146,3 +146,71 @@ const int EEPROM_BASE_ADDR = 0;
 const uint8_t  LCD_I2C_ADDR   = 0x27;
 const uint8_t  LCD_COLS       = 16;
 const uint16_t LCD_REFRESH_MS = 200;
+
+// ===========================================================================
+//  11. IMU  --  absolute angle from gravity
+// ===========================================================================
+//  The yaw axis on this mount is TILTED, which is the entire reason this
+//  works: rotating about a tilted axis tilts the dish, and gravity measures
+//  tilt directly. Yaw error is tilt error divided by sin(axis tilt from
+//  vertical) -- at Davis that is a 1.28x penalty, so ~0.1 deg of tilt noise
+//  gives ~0.13 deg of yaw.
+//
+//  For the 8 ft dish at 1694 MHz the beam is 5.08 deg wide and 2.54 deg off
+//  boresight already costs 3 dB, so the real budget is ~1 deg. Gravity clears
+//  it by 8x or better. No magnetometer on this mount will: the pier stays
+//  fixed in the earth frame while the sensor sweeps through it, and that
+//  residual is not reachable by any static calibration.
+//
+//  The MMC5603 / GY-271 / the MPU's own AK8975 are therefore all unused here.
+//  Keep them for a mount whose axis is vertical, where gravity has nothing
+//  to say and a compass is the only option left.
+#define IMU_MPU9150   1
+#define IMU_FXOS8700  2
+
+#define USE_IMU     1
+#define IMU_SENSOR  IMU_FXOS8700     // <-- match your hardware
+
+#if IMU_SENSOR == IMU_MPU9150
+  // 0x68 with AD0 low, 0x69 with it high.
+  const uint8_t IMU_I2C_ADDR = 0x68;
+#else
+  // Adafruit's FXOS8700 breakout straps SA0/SA1 for 0x1F. Bare modules may
+  // be at 0x1C, 0x1D or 0x1E.
+  const uint8_t IMU_I2C_ADDR = 0x1F;
+#endif
+
+// Samples per reading, and the pause between them. 64 x 5 ms is a third of a
+// second of averaging, which is cheap when the dish is standing still anyway.
+const uint8_t  IMU_SAMPLES    = 64;
+const uint16_t IMU_SAMPLE_GAP_MS = 5;
+
+// Quality gates. An 8 ft dish is a large sail and an accelerometer cannot
+// tell gravity from wind, so a batch that moved is thrown away rather than
+// believed. Loosen SPREAD if calm-day readings are being rejected; if it has
+// to go far above 0.02 g the mount is moving enough to matter to pointing.
+const float IMU_MAX_SPREAD_G    = 0.015f;
+// The averaged vector should be 1.000 g. Much off and it is bias, a wrong
+// full-scale setting, or the wrong part answering.
+const float IMU_MAX_MAG_ERROR_G = 0.080f;
+
+// Sweep: how far to step between calibration samples, and how long to let
+// the mount stop ringing before reading. The sweep MUST be step-stop-read --
+// an accelerometer read while the motor is running measures the motor.
+const long     IMU_SWEEP_STEP_COUNTS = 20;
+const uint16_t IMU_SWEEP_SETTLE_MS   = 1200;
+
+// ===========================================================================
+//  12. BUZZER
+// ===========================================================================
+//  Active buzzer (self-oscillating, driven from DC) -- NOT passive. Timer0 is
+//  millis(), Timer1/Timer2 are motor PWM, and there is no spare timer here to
+//  give tone(). D7 and D4 are clear of both driver pinouts, the reed on D2 and
+//  the I2C pins on A4/A5.
+//
+//  BUZZER_GROUND_PIN is held permanently LOW so an active buzzer plugs into
+//  two adjacent headers with no flying ground lead. Set it to -1 if you would
+//  rather wire ground properly.
+#define USE_BUZZER 1
+const uint8_t PIN_BUZZER        = 7;
+#define BUZZER_GROUND_PIN 4

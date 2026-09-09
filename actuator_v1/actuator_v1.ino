@@ -7,6 +7,9 @@
   #include <EEPROM.h>
 #endif
 
+#include "Imu.h"
+#include "Buzzer.h"
+
 // Defined down with the persistence code, called from motion code above it.
 // The IDE would synthesise this prototype; saying it out loud means the file
 // also compiles with a plain avr-g++ invocation.
@@ -275,6 +278,7 @@ void enterFault(Fault f) {
   haltMotor();
   g_state = ST_FAULT;
   g_fault = f;
+  beep(BEEP_FAULT);
 
   Serial.print(F("  FAULT: "));
   Serial.print(faultName());
@@ -331,6 +335,9 @@ void stopNow(const __FlashStringHelper* why) {
   const unsigned long elapsed = millis() - g_motionStartMs;
   const unsigned long moved   = pulseTotal() - g_pulsesAtStart;
 
+  // A stop is not a finish. Whatever pattern was mid-sequence would otherwise
+  // play on cheerfully over something that has just gone wrong.
+  buzzerSilence();
   enterIdle();
 
   Serial.print(F("  STOP ("));
@@ -452,6 +459,7 @@ void zeroHere() {
     Serial.println(F("  retract stop, which this no longer locates. Redo a/b."));
   }
   Serial.println(F("  zero = here"));
+  beep(BEEP_HOME);
   saveState();
 }
 
@@ -460,6 +468,7 @@ void zeroHere() {
 // ---------------------------------------------------------------------------
 
 void reportLanding() {
+  beep(BEEP_DONE);
   const long here = position();
   const long err  = here - g_target;
 
@@ -961,6 +970,10 @@ void printHelp() {
   Serial.println(F("  h            home: retract into the near stop"));
   Serial.println(F("  c            calibrate: home, then learn the full travel"));
   Serial.println(F("  z            zero here (forgets travel -- see the code)"));
+  Serial.println(F("--- gravity (absolute angle, needs the IMU) ------------"));
+  Serial.println(F("  m            read gravity now, averaged and gated"));
+  Serial.println(F("  w [step]     calibration sweep: step, stop, read, log"));
+  Serial.println(F("  P <n>        declare position n -- the host's answer"));
   Serial.println(F("--- everything else ------------------------------------"));
   Serial.println(F("  <Enter>      STOP  (also 'x')"));
   Serial.println(F("  s            status"));
@@ -1122,6 +1135,172 @@ void cmdAnglePoint(char which, const char* arg) {
   saveState();
 }
 
+// ---------------------------------------------------------------------------
+//  IMU
+// ---------------------------------------------------------------------------
+//  The sketch reports gravity and stops there. It does not compute yaw: the
+//  axis fit and the counts<->degrees curve live in host/axis_fit.py, for the
+//  same reason the satellite math does -- the host has floats, a config file
+//  and tests, and this part has 32 KB. What comes back here is the raw
+//  measurement; the host turns it into an angle.
+
+void printImuSample(const ImuSample& s) {
+  if (!s.ok && s.n == 0) {
+    Serial.println(F("  IMU: no answer"));
+    return;
+  }
+  Serial.print(F("  g = ["));
+  Serial.print(s.x, 5); Serial.print(' ');
+  Serial.print(s.y, 5); Serial.print(' ');
+  Serial.print(s.z, 5);
+  Serial.print(F("]  |a|="));   Serial.print(s.magnitude_g, 4);
+  Serial.print(F(" g  spread=")); Serial.print(s.spread_g, 4);
+  Serial.print(F(" g  T="));      Serial.print(s.temp_c, 1);
+  Serial.print(F(" C  n="));      Serial.println(s.n);
+
+  if (!s.ok) {
+    // Two different complaints, and they want different fixes.
+    if (s.spread_g > IMU_MAX_SPREAD_G) {
+      Serial.println(F("  REJECTED: the dish was moving. Wind, or it has not"));
+      Serial.println(F("  finished ringing since the last move. Wait, retry."));
+    } else {
+      Serial.println(F("  REJECTED: |a| is not 1 g. Bias, wrong full-scale,"));
+      Serial.println(F("  or the wrong part answering at that address."));
+    }
+  }
+}
+
+void cmdImu() {
+  if (!g_imuOk) {
+    Serial.println(F("  no IMU -- nothing acknowledged at that address"));
+    return;
+  }
+  if (g_state != ST_IDLE) {
+    // An accelerometer under power measures the motor, not the sky.
+    Serial.println(F("  not while it is moving"));
+    return;
+  }
+  printImuSample(imuRead(IMU_SAMPLES, IMU_SAMPLE_GAP_MS));
+}
+
+// Run the state machine to a standstill. Used only by the sweep, which is a
+// deliberate calibration run, so blocking here is fine -- but it still has to
+// service stalls, and it still has to be abortable.
+bool sweepRunUntilIdle() {
+  const unsigned long guard = millis();
+  while (g_state != ST_IDLE) {
+    updateMotion();
+    buzzerUpdate(millis());
+    if (g_state == ST_FAULT) return false;
+    if (Serial.available()) {
+      while (Serial.available()) Serial.read();
+      stopNow(F("sweep aborted"));
+      return false;
+    }
+    if (millis() - guard > MAX_RUN_MS) {
+      Serial.println(F("  sweep leg ran too long"));
+      return false;
+    }
+  }
+  return true;
+}
+
+// The calibration sweep. Step, STOP, let the mount settle, then read -- an
+// accelerometer cannot be read while the motor is running, so this is not a
+// continuous scan and cannot be made into one. Every row is one stationary
+// measurement paired with the count it was taken at; host/axis_fit.py turns
+// the set of them into the rotation axis and the counts->degrees curve.
+void cmdSweep(const char* arg) {
+  if (!g_imuOk) {
+    Serial.println(F("  no IMU -- nothing to sweep"));
+    return;
+  }
+  if (!haveSoftLimits()) {
+    Serial.println(F("  needs travel: run 'c' first, so the sweep knows"));
+    Serial.println(F("  where both ends are and stays off the stops."));
+    return;
+  }
+
+  long step = IMU_SWEEP_STEP_COUNTS;
+  long v;
+  if (parseLong(arg, &v) && v > 0) step = v;
+
+  const long from = softMin();
+  const long to   = softMax();
+
+  Serial.print(F("  sweep "));  Serial.print(from);
+  Serial.print(F(" .. "));      Serial.print(to);
+  Serial.print(F(" step "));    Serial.print(step);
+  Serial.print(F("  ~"));       Serial.print((to - from) / step + 1);
+  Serial.println(F(" points. Any key aborts."));
+  Serial.println(F("SWEEP,counts,gx,gy,gz,temp_c,spread_g"));
+
+  uint16_t taken = 0, rejected = 0;
+
+  for (long target = from; target <= to; target += step) {
+    if (!startSeek(target, g_speed)) break;
+    if (!sweepRunUntilIdle()) break;
+
+    // The carriage has stopped but an 8 ft dish has not. This settle is the
+    // difference between measuring gravity and measuring the mount ringing.
+    delay(IMU_SWEEP_SETTLE_MS);
+
+    const ImuSample s = imuRead(IMU_SAMPLES, IMU_SAMPLE_GAP_MS);
+    if (s.n == 0) {
+      Serial.println(F("  IMU stopped answering -- sweep abandoned"));
+      break;
+    }
+
+    Serial.print(F("SWEEP,"));
+    Serial.print(position());      Serial.print(',');
+    Serial.print(s.x, 6);          Serial.print(',');
+    Serial.print(s.y, 6);          Serial.print(',');
+    Serial.print(s.z, 6);          Serial.print(',');
+    Serial.print(s.temp_c, 2);     Serial.print(',');
+    Serial.println(s.spread_g, 5);
+
+    if (s.ok) { taken++; beep(BEEP_TICK); } else { rejected++; }
+  }
+
+  Serial.print(F("  sweep done: "));   Serial.print(taken);
+  Serial.print(F(" good, "));          Serial.print(rejected);
+  Serial.println(F(" rejected. Feed the SWEEP rows to host/axis_fit.py."));
+  beep(BEEP_HOME);
+}
+
+// The host has worked out where the carriage actually is, from gravity, and
+// is telling us. This is the whole point of the IMU: an origin without
+// driving into a stop.
+//
+// It is an ASSERTION, not a measurement made here, and it is trusted the way
+// a home is trusted -- because the thing asserting it measured the dish
+// rather than counted motor pulses.
+void cmdDeclarePosition(const char* arg) {
+  long v;
+  if (!parseLong(arg, &v)) {
+    Serial.println(F("  P needs a position in counts: 'P -134'"));
+    return;
+  }
+  if (g_state != ST_IDLE) {
+    Serial.println(F("  not while it is moving"));
+    return;
+  }
+
+  const long was = position();
+  setPosition(v);
+  g_target = v;
+  g_homed  = true;
+
+  Serial.print(F("  position declared = "));  Serial.print(v);
+  Serial.print(F("  (was "));                 Serial.print(was);
+  Serial.print(F(", delta "));                Serial.print(v - was);
+  Serial.println(F(")"));
+  Serial.println(F("  Absolute moves are now allowed. This came from gravity,"));
+  Serial.println(F("  not from the cam -- 'h' still measures the stop."));
+  beep(BEEP_HOME);
+  saveState();
+}
+
 void cmdDebounce(const char* arg) {
   long v;
   if (!parseLong(arg, &v)) {
@@ -1207,6 +1386,10 @@ void handleCommand(char* line) {
       Serial.print(F("  jog time = ")); Serial.print(g_jogMs);
       Serial.println(F(" ms"));
       break;
+
+    case 'm': cmdImu();              break;
+    case 'w': cmdSweep(arg);         break;
+    case 'P': cmdDeclarePosition(arg); break;
 
     case 'v': cmdSpeed(arg);    break;
     case 'd': cmdDebounce(arg); break;
@@ -1302,6 +1485,18 @@ void setup() {
   Serial.println(F("only right while nothing back-drives the actuator."));
   Serial.println();
 
+  buzzerBegin();
+
+  imuBegin();
+#if USE_IMU
+  Serial.print(F("IMU: "));
+  if (g_imuOk) {
+    Serial.println(F("found. 'm' reads it, 'w' sweeps for calibration."));
+  } else {
+    Serial.println(F("no answer -- check the address and WHO_AM_I."));
+  }
+#endif
+
   lcdBegin();
 #if USE_LCD
   Serial.print(F("LCD: "));
@@ -1339,7 +1534,9 @@ void setup() {
 }
 
 void loop() {
+  const unsigned long now = millis();
   pollSerial();
   updateMotion();
-  lcdUpdate(millis());
+  buzzerUpdate(now);
+  lcdUpdate(now);
 }

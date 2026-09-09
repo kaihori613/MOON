@@ -58,6 +58,50 @@ the actuator is drivable — the azimuth depends only on where you are standing.
 
 ## Calibrating the linkage
 
+Three ways now, and the first one supersedes the other two if you have an
+accelerometer on the dish.
+
+### `gravity` — sweep once, no compass, no tape measure
+
+The yaw axis is tilted, so rotating the dish tilts it, and an accelerometer
+measures that directly. Across a sweep the gravity vector traces a circle in
+the sensor's frame; the circle's plane is perpendicular to the rotation axis,
+and the angle around it is yaw.
+
+```
+c                     # home and learn the travel
+w                     # step, stop, settle, read -- capture the console
+```
+
+```bash
+python calibrate_axis.py --from-log sweep.txt --save
+```
+
+This gives the counts→degrees curve **as measured**, over the whole stroke,
+which is what the `linear` and `triangle` models below are both trying to
+approximate. It also answers, with a number, the question this file has so far
+been answering on faith: `linear worst error` is exactly how far the linkage
+departs from a straight line.
+
+Read two things before believing the result:
+
+- **`conditioning`** — must be above 25. Below that the sweep was too short and
+  the angle scale is wrong even though the residuals look clean. The fix is to
+  sweep more travel, not to average harder.
+- **`error amplification`** — tilt error into yaw error, `1/sin(gamma)`. Around
+  1.3 on a polar mount. If it is above 3 the axis is closer to vertical than
+  this method likes.
+
+No hardware to hand? `make_test_sweep.py` emits a synthetic sweep in exactly
+the sketch's output format:
+
+```bash
+python make_test_sweep.py > sweep.txt && python calibrate_axis.py --from-log sweep.txt
+python make_test_sweep.py --deg-per-count 0.012 > short.txt   # the short-arc failure
+```
+
+### The older two
+
 The program needs to convert a heading into reed counts. Two models, picked by
 `linkage.model`:
 
@@ -139,16 +183,23 @@ queueing up a pile of moves and overshooting.
 
 ## Testing it with no actuator
 
-There is no simulator any more — it belonged to `actuator_system/`, which was
-deleted in favour of `actuator_v1/`. So the serial side currently cannot be
-exercised without a real Arduino and a real actuator. (The old simulator is
-recoverable from git history if that becomes painful.)
+There is still no simulator for the *serial* side — that belonged to
+`actuator_system/`, which was deleted in favour of `actuator_v1/`, and is
+recoverable from git history if it becomes painful.
 
-The pointing math has its own test, which needs no hardware at all:
+Everything else runs with no hardware:
 
 ```bash
-python test_geometry.py
+python test_geometry.py       # the pointing math          -- 21/21
+python test_axis_fit.py       # the gravity axis fit       -- 24/24
+python make_test_sweep.py > sweep.txt && python calibrate_axis.py --from-log sweep.txt
 ```
+
+That last pair covers the whole gravity calibration path end to end, from
+console text through parsing to the fitted curve. The live `--port` path joins
+it immediately after the parse, so a failure there is a serial problem rather
+than a maths one — which is the same reasoning as `link.py` only ever sending
+commands you could have typed by hand.
 
 ## Files
 
@@ -159,7 +210,11 @@ python test_geometry.py
 | `link.py` | serial transport, speaks the sketch's existing console protocol |
 | `config.py` | site, linkage and trim persistence |
 | `keys.py` | cross-platform single-keypress reader |
-| `test_geometry.py` | self-checks for the math |
+| `test_geometry.py` | self-checks for the pointing math |
+| `axis_fit.py` | rotation axis and counts↔degrees, fitted from a gravity sweep |
+| `calibrate_axis.py` | runs that fit over a sweep log or a live port |
+| `make_test_sweep.py` | synthetic sweeps, so the fit can be exercised dry |
+| `test_axis_fit.py` | self-checks for the axis fit |
 
 `link.py` deliberately sends only commands you could have typed by hand into
 the Serial Monitor. When something misbehaves, unplug the script, open the
