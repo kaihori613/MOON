@@ -232,6 +232,18 @@ rather than a stall against a mechanical stop.
 What it does *not* establish is where they cut, or whether they cut in the same
 place twice — see the open issue below.
 
+## Wiring
+
+[WIRING.md](WIRING.md) is the pin map, the power scheme and the grounding.
+Read the grounding section before wiring anything: the Arduino ground must
+star at the supply negative rather than hang off the L298N's GND terminal,
+because that terminal carries the motor return current and the drop along it
+lands on the reed input.
+
+None of it has been built. The motor and reed rows describe hardware that has
+run; the buttons, buzzer and IMU rows are reservations, so that the document
+and `Config.h` cannot drift apart.
+
 ## Configuration
 
 Everything tunable lives in `actuator_v1/Config.h` — pins, speeds, tolerances,
@@ -277,6 +289,14 @@ has finished moving and the landing reports lie to you.
   constant, and in counts for the deadband. Still needs doing.
 - No off-target tests for the state machine, and no simulator any more, so
   there is currently no way to exercise it without hardware.
+- **The front panel and the IMU are reserved, not implemented.** `Config.h`
+  sections 11 and 12 claim pins for three buttons, a buzzer and an MPU6050,
+  and `USE_BUTTONS` / `USE_BUZZER` / `USE_IMU` all default to `0` because no
+  code reads them. Two things to know before writing that code: `<Wire.h>` is
+  guarded on `USE_LCD` alone and needs to become `USE_LCD || USE_IMU`, and the
+  MPU6050 **cannot measure yaw** — it is a six-axis part with no magnetometer,
+  so it cannot replace the compass sighting behind `a` and `b`. What it can
+  usefully do instead is in [WIRING.md](WIRING.md).
 - **The degrees readout is uncalibrated and shows `?`.** `a`/`b` fix that in a
   couple of minutes with a compass, but it needs the actuator drivable first.
 - Flash sits at 63% with the LCD compiled out, 81% with it in. `Wire` and
