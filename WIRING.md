@@ -43,18 +43,35 @@ collide, and `Wire` is already initialised at 400 kHz for the display.
 Two rails, one ground, and the ground is the part that matters.
 
 ```
-  actuator supply (+)  ─────────────┬──── L298N  12V
-                                    │
-                                   470uF (bulk, observe polarity)
-                                    │
-  actuator supply (−)  ──┬──────────┴──── L298N  GND
-                         │
-                         └──────────────── Arduino GND      <- separate wire
+  25V supply (+)  ────────┬─────────────── L298N  12V terminal
+                           │
+             1000uF/50V ───┴─── 100nF/50V   (parallel, at the terminals)
+                           │
+  25V supply (−)  ────┬────┴─────────────── L298N  GND
+                      │
+                      └────────────────────  Arduino GND   <- separate wire
+
+  Arduino 5V  ──────────────────────────── L298N  5V     <- REQUIRED at 25V,
+                                                             jumper removed
 ```
 
-The actuator supply is drawn as 12 V. **Confirm that against the actuator's
-own plate before connecting anything** — plenty of TVRO units are 36 V, and
-that changes both the supply and whether the L298N is usable at all.
+The rail is 25 V. **Confirm that against the actuator's own plate before
+connecting anything** — TVRO units come as 12, 24 and 36 V, and the answer
+changes both the supply and whether the L298N is usable at all.
+
+### The 5V-EN jumper must be REMOVED at 25 V
+
+That jumper enables an onboard 7805 whose input is the full motor rail. At
+25 V it drops 20 V, which is a couple of watts in a TO-220 with very little
+copper under it, and it will cook. The module is specified for roughly 12 V
+on that terminal with the jumper fitted.
+
+With the jumper off, the `5V` pin stops being an output and becomes the
+**input** that powers the bridge's own logic. It has to be fed — from the
+Arduino's `5V` pin, which is tens of milliamps and well inside the USB budget.
+
+This is the reverse of what a 12 V rail wants, and it is the easiest thing to
+get wrong when moving a design up in voltage.
 
 ### Ground
 
@@ -66,23 +83,23 @@ the pickup path the noise-floor issue in the README is about.
 
 ### 5 V
 
-The L298N's `5V` pin is the **output** of an onboard 7805 whenever the `5V-EN`
-jumper is fitted. So:
+One rail, and USB makes it. With `5V-EN` removed, as it must be at 25 V, the
+L298N does not generate 5 V at all.
 
-- **Bench, USB attached (this is the normal case today).** USB powers the
-  logic. Leave `5V-EN` fitted; leave the L298N's `5V` pin **unconnected**.
-  Buttons, buzzer and IMU take 5 V from the Arduino's `5V` pin as an output —
-  a few tens of mA, well inside the USB budget.
-- **Standalone, no PC.** Unplug USB, then `5V-EN` fitted and L298N `5V` →
-  Arduino `5V`.
+- **Bench, USB attached (the normal case today).** USB powers the logic.
+  Arduino `5V` → L298N `5V`. Buttons, buzzer and IMU take 5 V from that same
+  pin — a few tens of mA, well inside the USB budget.
+- **Standalone, no PC.** Unplug USB first, then bring in a real 5 V supply — a
+  small buck converter off the 25 V rail is the tidy answer — and land it on
+  the Arduino `5V` pin and the L298N `5V` pin together.
 
-Never both. Driving the Arduino's `5V` pin from an external supply while USB is
-connected puts that supply in a fight with the host through the USB polyfuse —
-the Uno's auto-switchover arbitrates VIN against USB and does nothing for the
-5 V pin. And feeding a supply *into* the L298N's `5V` pin with the jumper
-fitted back-drives the 7805's output.
+Never both. Driving the Arduino's `5V` pin from an external supply while USB
+is connected puts that supply in a fight with the host through the USB
+polyfuse; the Uno's auto-switchover arbitrates VIN against USB and does
+nothing for the 5 V pin.
 
-A separate bench 5 V supply is not needed for any of this.
+**Do not feed 25 V to `VIN`.** The Uno's onboard regulator has the same
+dissipation problem the L298N's does, for the same reason.
 
 ## Reed switch
 
@@ -103,18 +120,44 @@ disconnected reed reads high rather than floating.
 
 ## Capacitors
 
-| Where | Value | Why |
-|---|---|---|
-| L298N 12V ↔ GND | 470 uF electrolytic | Bulk. Breakaway current comes from here, not from the supply leads |
-| MPU6050 VCC ↔ GND | 100 nF ceramic | Decoupling, at the module |
-| Motor terminals | 100 nF **ceramic**, optional | Brush noise, with a reed switch nearby |
+Four that matter, six to do it properly. **The voltage ratings are not
+decoration** — see below the table.
 
-**No electrolytic across the motor.** It is polarised and the motor reverses,
-so it spends half its life reverse-biased, which is how electrolytics vent. A
-capacitor across a PWM'd bridge output is also a near-short at every switching
-edge — current through the L298N's transistors that does no work. If brush
-noise turns out to need suppression, it is ceramics only, 100 nF or less, and
-the bulk capacitance belongs on the supply input instead.
+| # | Value | Rating | Where | Why |
+|---|---|---|---|---|
+| 1 | 1000 uF electrolytic | **50 V** | L298N 12V ↔ GND | Bulk. Breakaway current comes from here, not down the supply leads |
+| 2 | 100 nF ceramic | 50 V | same terminals, parallel with #1 | An electrolytic's ESL makes it useless at PWM edge speeds |
+| 3 | 100 nF ceramic | any | MPU6050 VCC ↔ GND | Decoupling, at the module |
+| 4 | 220 nF ceramic | any | Reed, D2 ↔ GND | Part of the reed filter above |
+| 5 | 100 uF electrolytic | 16 V | 5 V rail at the panel end | The buzzer pulses current down a long wire |
+| 6 | 100 nF ceramic | any | L298N 5V ↔ GND | Only if that run from the Arduino is long |
+
+### Nothing 25 V rated goes on a 25 V rail
+
+Electrolytics want 1.5–2x headroom over their working voltage, so 25 V
+working means **50 V parts**. Three reasons stack:
+
+- A 25 V supply is not 25 V. Unloaded, or nominal-24 at +10%, it sits at
+  26–27 V.
+- **Reversing or braking a motor pumps energy back into the rail.** The bridge
+  runs backwards as a boost converter into the supply and the rail lifts above
+  nominal. `REVERSE_DEAD_MS = 200` exists because of this, and capacitor #1 is
+  what absorbs what is left.
+- Derating is what buys an electrolytic its lifetime. Run one at 100 % of
+  rating and it cooks.
+
+Buy low-ESR parts, and check the **ripple current** rating rather than only
+the capacitance. Ripple current is what kills bulk capacitors beside a bridge.
+
+### No electrolytic across the motor
+
+It is polarised and the motor reverses, so it spends half its life
+reverse-biased, which is how electrolytics vent. A capacitor across a PWM'd
+bridge output is also a near-short at every switching edge — current through
+the L298N's transistors that does no work. If brush noise ever needs
+suppression it is ceramics only, 100 nF or less, rated for the full rail; and
+the bulk capacitance belongs on the supply input regardless. Leave it off
+until the reed actually shows pickup.
 
 ## Buzzer
 
@@ -181,8 +224,10 @@ For anyone comparing against the drawing this came from:
   only position sensor the loop has.
 - MPU6050 SDA/SCL moved off D13/D12 to A4/A5.
 - Second bridge unused rather than half-wired. OUT1/OUT2 stay empty.
-- Separate 5 V supply removed; see the 5 V section above for why it fights
-  both the L298N regulator and USB.
+- Separate 5 V supply removed. At 25 V the bridge's regulator is disabled
+  anyway, so the Arduino feeds the L298N's logic rather than the reverse.
+- Rail is 25 V, not the 12 V drawn, so `5V-EN` comes off and every capacitor
+  on the motor side becomes a 50 V part.
 - 1 uF electrolytic across the motor removed, replaced by bulk capacitance
   across the supply input.
 - Buzzer given a transistor.
