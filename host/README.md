@@ -45,6 +45,50 @@ fed SNR has no sign to act on. Peaking is a *search* — step, dwell, compare,
 reverse and halve when it gets worse. The sketch runs a PID on **angle**,
 where the error does have a sign, and this side hands it target angles.
 
+### If you decode with SatDump
+
+`satdump.py` is the same interface over SatDump's HTTP status endpoint:
+
+```bash
+satdump live <pipeline> <output> --source ... --http_server 0.0.0.0:8080
+python3 satdump.py --probe http://127.0.0.1:8080/
+```
+
+`--probe` prints every numeric field the endpoint serves, because what is in
+there varies by SatDump version and pipeline. Pick the one that tracks link
+quality. **If it is an SNR in dB then higher is better**, so construct
+`Metric(..., lower_is_better=False)` — the opposite of the Viterbi case below,
+and the easiest sign error in the loop.
+
+Non-numeric fields are dropped rather than coerced. A status string like
+`SYNCED` is useful to a human, but mapping it to `1.0` would put a constant
+into the loop that looks like a measurement.
+
+### Triggering on a recording, and why that is two signals
+
+Starting the search when SatDump starts recording is the right idea on the
+wrong edge. A recording starting means the **scheduler** fired. It does not
+mean the demodulator has locked, and until it has, the metric is either
+absent or measuring noise. So:
+
+```
+recording started   ->  ARM the search
+metric is live      ->  RUN it
+```
+
+`RecordingWatcher` gives you the first, by watching the output directory for
+a new entry. Filesystem rather than an API on purpose: it needs no SatDump
+feature, no version agreement and no cooperation from the scheduler, so it
+keeps working across upgrades.
+
+```bash
+python3 satdump.py --watch-dir /path/to/satdump/output
+```
+
+`wait_for_lock()` gives you the second. It returns the first real reading, or
+raises — because a search that runs without signal does not fail loudly, it
+walks the dish somewhere wrong and reports success.
+
 ### Getting the number out of goesrecv
 
 goesrecv emits statsd over UDP, which is plain text on a datagram socket — no

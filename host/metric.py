@@ -44,8 +44,9 @@ Then measure how noisy it is before trusting it (see below):
 
     python3 metric.py --noise <name> --seconds 120
 
-SatDump is the other reasonable source; its live server exposes SNR over
-HTTP. That path is not implemented here.
+If you decode with SatDump instead, see satdump.py -- it provides the same
+interface over SatDump's HTTP status endpoint, plus detection of when a
+recording has actually started.
 """
 
 from __future__ import annotations
@@ -74,25 +75,71 @@ class MetricError(RuntimeError):
 #  Sources
 # ---------------------------------------------------------------------------
 
-class StatsdSource:
+class MetricSource:
     """
-    Listens for statsd datagrams and keeps a short history of every metric it
-    sees, keyed by name.
+    A named-value history with a background feeder.
 
-    Deliberately keeps ALL names rather than only a configured one, so that
-    --discover works and so a mis-set name shows up as "that name never
-    arrived" rather than as a silent stream of zeros.
+    Everything downstream -- Metric, noise_floor, the search -- only ever
+    needs names(), since() and latest(), so the transport underneath is
+    interchangeable. statsd from goesrecv is one; SatDump's HTTP status
+    (see satdump.py) is another.
+
+    Every source keeps ALL names it sees rather than only a configured one.
+    That is what makes discovery possible, and it means a mis-set name shows
+    up as "that name never arrived" instead of as a silent stream of zeros.
+    """
+
+    def __init__(self, history: int = 20000):
+        self._hist = defaultdict(lambda: deque(maxlen=history))
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _record(self, name: str, value: float, when=None):
+        with self._lock:
+            self._hist[name].append((when if when is not None else time.time(),
+                                     value))
+
+    def names(self):
+        with self._lock:
+            return sorted(self._hist.keys())
+
+    def since(self, name: str, t0: float):
+        """Every (time, value) for `name` recorded at or after t0."""
+        with self._lock:
+            return [(t, v) for (t, v) in self._hist[name] if t >= t0]
+
+    def latest(self, name: str):
+        with self._lock:
+            h = self._hist[name]
+            return h[-1] if h else None
+
+    def start(self):
+        raise NotImplementedError
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.stop()
+
+
+class StatsdSource(MetricSource):
+    """
+    Listens for statsd datagrams, as goesrecv's [monitor] section emits them.
     """
 
     def __init__(self, port: int = DEFAULT_STATSD_PORT,
                  bind: str = "127.0.0.1", history: int = 20000):
+        super().__init__(history=history)
         self.port = port
         self.bind = bind
-        self._hist = defaultdict(lambda: deque(maxlen=history))
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
         self._sock = None
-        self._thread = None
 
     def start(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -127,35 +174,13 @@ class StatsdSource:
                     value = float(raw)
                 except ValueError:
                     continue
-                with self._lock:
-                    self._hist[name].append((now, value))
+                self._record(name, value, now)
 
     def stop(self):
         self._stop.set()
         if self._sock:
             self._sock.close()
-        if self._thread:
-            self._thread.join(timeout=1.0)
-
-    def names(self):
-        with self._lock:
-            return sorted(self._hist.keys())
-
-    def since(self, name: str, t0: float):
-        """Every (time, value) for `name` recorded at or after t0."""
-        with self._lock:
-            return [(t, v) for (t, v) in self._hist[name] if t >= t0]
-
-    def latest(self, name: str):
-        with self._lock:
-            h = self._hist[name]
-            return h[-1] if h else None
-
-    def __enter__(self):
-        return self.start()
-
-    def __exit__(self, *exc):
-        self.stop()
+        super().stop()
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +197,7 @@ class Metric:
     make in the whole loop.
     """
 
-    def __init__(self, source: StatsdSource, name: str,
+    def __init__(self, source: MetricSource, name: str,
                  lower_is_better: bool = True):
         self.source = source
         self.name = name
@@ -237,7 +262,7 @@ def block_means(rows, dwell: float):
     return out
 
 
-def noise_floor(source: StatsdSource, name: str, seconds: float,
+def noise_floor(source: MetricSource, name: str, seconds: float,
                 dwells=(1.0, 2.0, 5.0, 10.0)):
     """
     Measure the metric with the dish NOT MOVING, and report how much the

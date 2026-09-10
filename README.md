@@ -23,7 +23,7 @@ is the first sketch here that does; that part has not been on hardware yet.
 | `actuator_v1/` | **Compiles clean, 63% flash / 17% RAM on a 328P. Never run.** Rev A |
 | `as5600_test/` | **Rev B bring-up. Syntax-checked only, never run.** No motor code in it |
 | `actuator_v2/` | **Rev B. Syntax-checked against stubs, never compiled for AVR, never run** |
-| `host/metric.py` | **Runs.** Exercised against synthetic statsd; never seen a real receiver |
+| `host/metric.py`, `host/satdump.py` | **Run.** Exercised against synthetic statsd and a stand-in HTTP server; neither has seen a real receiver |
 | Rest of `host/` | Written, never executed — no Python on the build machine yet |
 
 An earlier lineage, `actuator_system/`, was deleted in favour of v1. It was
