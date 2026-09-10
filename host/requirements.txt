@@ -1,1 +1,8 @@
 pyserial>=3.5
+
+# Optional. Only iq_snr.snr_psd() needs it -- snr_m2m4() is pure stdlib,
+# and metric.py / satdump.py need nothing beyond the standard library.
+# numpy>=1.24
+# Optional. Only iq_snr.capture_rtlsdr() needs it, and that needs
+# librtlsdr installed as well.
+# pyrtlsdr>=0.3

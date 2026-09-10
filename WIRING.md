@@ -13,11 +13,11 @@ is still in git history and `actuator_v1/` still runs it.
 | | Rev A | Rev B |
 |---|---|---|
 | Position | reed pulses, signed by commanded direction | AS5600 absolute angle on the pivot |
-| Homing | drive into the retract cam every boot | none — absolute means absolute |
+| Homing | drive into the retract cam every boot, required before any move | on demand only, as a check that the stored zero is still right |
 | Bridge | L298N | Pololu G2 24v13 |
 | Reed | the position sensor | motion witness only |
 | IMU | MPU6050 planned | dropped |
-| Limits | actuator's internal cams only | cams at ±10° that cut current |
+| Limits | actuator's internal cams only | cams at ±10° that cut current; the minus one doubles as home |
 
 Three things drove it. The reed had no direction and sat on the motor side of
 the leadscrew backlash, so it measured the wrong quantity in the wrong place.
@@ -31,7 +31,7 @@ L298N is a 2 A part with a 2–3 V drop being asked to run a jack at 25 V.
 | D0, D1 | USB serial | Console, and the target-angle channel from the host |
 | D2 | Reed switch | **INT0.** Health witness — nothing integrates it any more |
 | D3 | Limit flag, +10° | NC to GND, `INPUT_PULLUP` |
-| D4 | Limit flag, −10° | NC to GND, `INPUT_PULLUP` |
+| D4 | Limit flag, −10° | NC to GND, `INPUT_PULLUP`. **Also the home reference** |
 | D7 | Driver DIR | |
 | D8 | Driver **/SLP** | **Must be driven HIGH** or the bridge stays asleep |
 | D9 | Driver PWM | Timer1 |
@@ -120,6 +120,39 @@ by a power diode, with the diodes facing opposite ways:
 
 Use **normally-closed** contacts so a broken wire reads as a tripped limit
 rather than as permission to keep going.
+
+### The minus cam is also the home reference
+
+`SW−` does double duty. No third switch, no extra pin.
+
+The encoder is absolute, but its **zero is not** — zero is a raw count in
+EEPROM, and nothing in the encoder can tell you the magnet has crept on its
+hub or that the EEPROM was wiped. Every angle would be wrong by a constant,
+confidently, with no symptom. So the firmware can drive to the minus cam and
+compare what the encoder reads there against a stored reference:
+
+- `h` — go to the cam, report the drift, change nothing
+- `H` — go to the cam and **adopt** the reading, re-deriving zero from
+  `HOME_ANGLE_DEG`
+
+Nothing homes at boot, and no move requires it. It is a check you run after
+remounting or when an angle looks wrong.
+
+Two details make it work:
+
+**Approach from one side, twice.** A microswitch's trip point moves with
+approach speed, so the firmware clears the switch, seeks it fast, retreats
+1°, then creeps back at `HOME_SPEED_CREEP`. Only the creep pass is believed.
+
+**A microswitch is a coarse reference** — expect a couple of tenths of a
+degree of repeatability against the encoder's 0.088°. That is fine here,
+because the pointing requirement is about ±1.1°, so a home good to 0.2°
+costs nothing measurable. It is *not* fine as a position sensor, which is
+why it only ever sets the origin.
+
+The escape diodes and homing get along: the approach drives into the cam
+until the hardware cuts that direction, and the retreat drives back out
+through the diode.
 
 Size the diodes for **full motor current** — they carry it whenever you are
 driving off a limit — so a 15 A, 45 V Schottky on a small heatsink, not a

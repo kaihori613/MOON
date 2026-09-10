@@ -41,7 +41,7 @@ const uint8_t PIN_REED = 2;
 // motor current in hardware; the pins only tell the firmware what the wiring
 // has already done.
 const uint8_t PIN_LIM_POS = 3;
-const uint8_t PIN_LIM_NEG = 4;
+const uint8_t PIN_LIM_NEG = 4;   // also the HOME reference -- see section 4b
 
 const uint8_t PIN_BTN_EXTEND  = A0;
 const uint8_t PIN_BTN_RETRACT = A1;
@@ -138,6 +138,59 @@ const uint8_t SPEED_FLOOR = 60;       // PLACEHOLDER breakaway; below = buzz
 const float SOFT_LIMIT_DEG = 9.0f;
 
 // ===========================================================================
+//  4b. HOMING  --  the minus cam does double duty
+// ===========================================================================
+//  An absolute encoder does not need homing to know where the boom is, and
+//  nothing here homes at boot. So why keep a home switch at all?
+//
+//  Because the encoder is absolute but its ZERO is not. Zero is a raw count
+//  stored in EEPROM, and there is no way to tell from the encoder alone that
+//  the magnet has crept on its hub, that the EEPROM has been wiped, or that
+//  the sensor has been replaced. Every angle would simply be wrong by a
+//  constant, confidently, with no symptom -- which is the same shape of
+//  failure v1 had with a back-driven dish, and it deserves the same answer:
+//  a physical reference you can go and check against.
+//
+//  So homing here is a CHECK, not a prerequisite:
+//      'h'   drive to the cam, compare the encoder against HOME_RAW,
+//            and report the difference as drift. Changes nothing.
+//      'H'   the same, but adopt the reading -- re-deriving the zero from
+//            HOME_ANGLE_DEG. This is what you run after remounting.
+//
+//  The minus cam is reused rather than adding a third switch. It costs no
+//  pin and no part; homing always approaches from the same direction, which
+//  is the same direction-unambiguity argument v1 made for the retract stop;
+//  and being at a boundary it is reachable from anywhere in travel. A switch
+//  in the middle of travel would be crossed constantly during normal moves
+//  and would have to be told apart from a homing trip.
+//
+//  A microswitch is a coarse reference -- expect a couple of tenths of a
+//  degree of repeatability against the encoder's 0.088. That is fine here:
+//  the pointing requirement is about +/-1.1 deg, so a home good to 0.2 deg
+//  costs nothing measurable. It is NOT fine as a position sensor, which is
+//  why it only ever sets the origin.
+#define HOME_ON_LIM_NEG 1
+
+// The angle the minus cam physically sits at. Homing adopts this as the
+// reading at the trip point, so the whole coordinate system is re-derivable
+// from one switch. Measure it once against the boom, not from the drawing.
+const float HOME_ANGLE_DEG = -10.0f;    // PLACEHOLDER
+
+// Two-stage approach. A microswitch's trip point moves with approach speed,
+// so the fast pass only finds the cam and the slow pass is what is believed.
+const uint8_t  HOME_SPEED_FAST  = 110;
+const uint8_t  HOME_SPEED_CREEP = 70;   // must still be above breakaway
+const float    HOME_BACKOFF_DEG = 1.0f; // retreat between the two passes
+const uint16_t HOME_TIMEOUT_MS  = 25000;
+
+// Raw count seen at the cam last time it was adopted. 'h' compares against
+// this; drift here means the magnet moved on its hub or the cam did.
+const int16_t HOME_RAW_DEFAULT = -1;    // -1 = never adopted
+
+// Report drift above this rather than staying quiet about it.
+const float HOME_DRIFT_WARN_DEG = 0.5f;
+
+// ===========================================================================
 //  5. HEALTH  --  what the reed is for now
 // ===========================================================================
 //  The reed no longer measures anything. It witnesses. Two failures that
@@ -194,4 +247,4 @@ const uint16_t STEP_SAMPLE_MS = 40;
 //  the question meaningless.
 #define USE_EEPROM 1
 const int EEPROM_BASE_ADDR = 64;   // clear of v1's block at 0
-const uint32_t EEPROM_MAGIC = 0x4D4F4E42UL;   // "MONB"
+const uint32_t EEPROM_MAGIC = 0x4D4F4E43UL;   // "MONC" -- bumped when home_raw was added

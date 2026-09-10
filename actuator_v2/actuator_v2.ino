@@ -99,12 +99,27 @@ int16_t angleDiff(uint16_t a, uint16_t b) {
   return d;
 }
 
+uint16_t wrapCount(long v) {
+  v %= (long)AS5600_COUNTS;
+  if (v < 0) v += (long)AS5600_COUNTS;
+  return (uint16_t)v;
+}
+
 float countsToDeg(int16_t counts) {
 #if ENCODER_INVERT
   return -(float)counts * DEG_PER_COUNT;
 #else
   return  (float)counts * DEG_PER_COUNT;
 #endif
+}
+
+int16_t degToCounts(float deg) {
+#if ENCODER_INVERT
+  const float c = -deg / DEG_PER_COUNT;
+#else
+  const float c =  deg / DEG_PER_COUNT;
+#endif
+  return (int16_t)(c + (c >= 0.0f ? 0.5f : -0.5f));
 }
 
 // Reads the encoder into the cached state. Returns false once the failure
@@ -256,11 +271,11 @@ float pidStep(float target, float meas, float dt) {
 //  State
 // ---------------------------------------------------------------------------
 
-enum State : uint8_t { ST_IDLE, ST_MOVING, ST_JOG, ST_STEPTEST, ST_FAULT };
+enum State : uint8_t { ST_IDLE, ST_MOVING, ST_JOG, ST_STEPTEST, ST_HOMING, ST_FAULT };
 static State g_state = ST_IDLE;
 
 enum Fault : uint8_t {
-  F_NONE = 0, F_STALL, F_LINKAGE, F_ENCODER, F_LIMIT, F_TIMEOUT, F_CURRENT, F_RANGE
+  F_NONE = 0, F_STALL, F_LINKAGE, F_ENCODER, F_LIMIT, F_TIMEOUT, F_CURRENT, F_RANGE, F_HOME
 };
 static Fault g_fault = F_NONE;
 
@@ -274,6 +289,13 @@ static unsigned long g_winPulses   = 0;
 static float         g_winStartDeg = 0.0f;
 static unsigned long g_lastLoopMs  = 0;
 static unsigned long g_lastTeleMs  = 0;
+
+// homing
+enum HomePhase : uint8_t { HP_CLEAR, HP_SEEK_FAST, HP_RETREAT, HP_SEEK_CREEP };
+static HomePhase g_homePhase = HP_CLEAR;
+static bool      g_homeAdopt = false;
+static float     g_homeRetreatTo = 0.0f;
+static int16_t   g_homeRaw = HOME_RAW_DEFAULT;
 
 // step test
 static unsigned long g_stepUntil = 0;
@@ -290,6 +312,7 @@ const __FlashStringHelper *faultName(Fault f) {
     case F_TIMEOUT: return F("timeout");
     case F_CURRENT: return F("current");
     case F_RANGE:   return F("range");
+    case F_HOME:    return F("home");
   }
   return F("?");
 }
@@ -300,6 +323,7 @@ const __FlashStringHelper *stateName(State s) {
     case ST_MOVING:   return F("MOVING");
     case ST_JOG:      return F("JOG");
     case ST_STEPTEST: return F("STEP");
+    case ST_HOMING:   return F("HOMING");
     case ST_FAULT:    return F("FAULT");
   }
   return F("?");
@@ -352,6 +376,7 @@ void printStatus() {
   Serial.print(limitNeg() ? '-' : '.');
   Serial.print(limitPos() ? '+' : '.');
   Serial.print(F(" reed="));   Serial.print(reedPulses());
+  Serial.print(F(" homeraw=")); Serial.print(g_homeRaw);
   Serial.print(F(" kp="));     printDeg(g_kp);
   Serial.print(F(" ki="));     printDeg(g_ki);
   Serial.print(F(" kd="));     printDeg(g_kd);
@@ -368,6 +393,7 @@ void printStatus() {
 struct Saved {
   uint32_t magic;
   int16_t  zero;
+  int16_t  homeRaw;
   float    kp, ki, kd, kff;
 };
 
@@ -375,6 +401,7 @@ void saveSettings() {
   Saved s;
   s.magic = EEPROM_MAGIC;
   s.zero = g_zeroCount;
+  s.homeRaw = g_homeRaw;
   s.kp = g_kp; s.ki = g_ki; s.kd = g_kd; s.kff = g_kff;
   EEPROM.put(EEPROM_BASE_ADDR, s);
   Serial.println(F("saved"));
@@ -385,6 +412,7 @@ void loadSettings() {
   EEPROM.get(EEPROM_BASE_ADDR, s);
   if (s.magic != EEPROM_MAGIC) { Serial.println(F("eeprom: blank, using defaults")); return; }
   g_zeroCount = s.zero;
+  g_homeRaw = s.homeRaw;
   g_kp = s.kp; g_ki = s.ki; g_kd = s.kd; g_kff = s.kff;
   Serial.println(F("eeprom: loaded"));
 }
@@ -430,6 +458,119 @@ void beginJog(int8_t dir, uint16_t ms) {
   g_winPulses = reedPulses();
   g_winStartDeg = positionDeg();
   g_state = ST_JOG;
+}
+
+// ---------------------------------------------------------------------------
+//  Homing -- the minus cam as a zero reference
+// ---------------------------------------------------------------------------
+//  Not a prerequisite for anything. The encoder is absolute, so the boom's
+//  position is known at power-on; what homing establishes is whether the
+//  stored ZERO is still the zero it was. Drift here means the magnet has
+//  crept on its hub or the cam has moved, and there is no other way to see
+//  either.
+
+void beginHoming(bool adopt) {
+  if (g_state == ST_FAULT) { Serial.println(F("faulted -- 'k' first")); return; }
+  if (!g_encOk)            { Serial.println(F("no encoder")); return; }
+
+  g_homeAdopt = adopt;
+  g_homePhase = HP_CLEAR;
+  g_moveStarted = millis();
+  g_winPulses = reedPulses();
+  g_winStartDeg = positionDeg();
+  pidReset();
+  g_state = ST_HOMING;
+
+  Serial.println(adopt ? F("homing -- will ADOPT the reading")
+                       : F("homing -- check only, nothing will change"));
+}
+
+void finishHoming(uint16_t tripRaw) {
+  motorOff();
+  g_state = ST_IDLE;
+
+  Serial.print(F("cam at raw ")); Serial.println(tripRaw);
+
+  if (g_homeRaw >= 0) {
+    const float drift = countsToDeg(angleDiff(tripRaw, (uint16_t)g_homeRaw));
+    Serial.print(F("drift vs stored: ")); printDeg(drift);
+    Serial.println(F(" deg"));
+    if (fabs(drift) > HOME_DRIFT_WARN_DEG) {
+      Serial.println(F("  ^ larger than expected. The magnet has moved on its"));
+      Serial.println(F("    hub, or the cam has. Re-check before trusting angles."));
+    }
+  } else {
+    Serial.println(F("no stored reference yet -- run 'H' to adopt this one"));
+  }
+
+  if (g_homeAdopt) {
+    g_homeRaw = (int16_t)tripRaw;
+    // Make this position read HOME_ANGLE_DEG, which re-derives the whole
+    // coordinate system from one switch.
+    g_zeroCount = (int16_t)wrapCount((long)tripRaw - (long)degToCounts(HOME_ANGLE_DEG));
+    Serial.print(F("adopted. zero=")); Serial.print(g_zeroCount);
+    Serial.print(F("  position now ")); printDeg(positionDeg());
+    Serial.println(F(" deg -- 'w' to save"));
+  }
+}
+
+// Returns true when the run is over (done or faulted).
+void homingTick() {
+  if (millis() - g_moveStarted > HOME_TIMEOUT_MS) {
+    Serial.println(F("homing found no cam"));
+    raiseFault(F_HOME);
+    return;
+  }
+
+  switch (g_homePhase) {
+
+    case HP_CLEAR:
+      // Start clear of the switch, so the fast seek always arrives at it
+      // from the same side.
+      if (limitNeg()) {
+        driveSigned((int)HOME_SPEED_FAST);
+      } else {
+        motorOff();
+        g_homePhase = HP_SEEK_FAST;
+        g_moveStarted = millis();
+      }
+      break;
+
+    case HP_SEEK_FAST:
+      if (limitNeg()) {
+        motorOff();
+        // Only a rough fix -- a microswitch's trip point moves with approach
+        // speed, so this pass exists to find the cam, not to be believed.
+        g_homeRetreatTo = positionDeg() + HOME_BACKOFF_DEG;
+        g_homePhase = HP_RETREAT;
+        g_moveStarted = millis();
+      } else {
+        driveSigned(-(int)HOME_SPEED_FAST);
+      }
+      break;
+
+    case HP_RETREAT:
+      if (!limitNeg() && positionDeg() >= g_homeRetreatTo) {
+        motorOff();
+        g_homePhase = HP_SEEK_CREEP;
+        g_moveStarted = millis();
+      } else {
+        driveSigned((int)HOME_SPEED_FAST);
+      }
+      break;
+
+    case HP_SEEK_CREEP:
+      if (limitNeg()) {
+        // This is the reading that counts. At creep speed the carriage moves
+        // far less than the encoder's resolution in one loop period, so the
+        // 20 ms of polling latency between the switch closing and this read
+        // costs nothing measurable.
+        finishHoming(g_encRaw);
+      } else {
+        driveSigned(-(int)HOME_SPEED_CREEP);
+      }
+      break;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +631,8 @@ void printHelp() {
   Serial.println(F("  e <ms>     open-loop jog   r <ms>"));
   Serial.println(F("  m          monitor raw encoder (check mounting/invert)"));
   Serial.println(F("  z          set zero here"));
+  Serial.println(F("  h          home to the minus cam and report drift"));
+  Serial.println(F("  H          home and ADOPT it as the zero reference"));
   Serial.println(F("  p/i/d/f <v> set kp/ki/kd/kff live"));
   Serial.println(F("  t <deg>    step test, CSV out"));
   Serial.println(F("  n          reed noise floor"));
@@ -557,9 +700,8 @@ void handleLine(char *s) {
       Serial.println(g_zeroCount);
       break;
 
-    case 'h':
-      Serial.println(F("homing is gone -- the encoder is absolute"));
-      break;
+    case 'h': beginHoming(false); break;   // check the zero
+    case 'H': beginHoming(true);  break;   // adopt this cam reading as the zero
 
     case 'p': if (hasArg) { g_kp  = fv; Serial.println(F("kp set"));  } break;
     case 'i': if (hasArg) { g_ki  = fv; pidReset(); Serial.println(F("ki set")); } break;
@@ -725,6 +867,11 @@ void loop() {
       break;
     }
 
+    case ST_HOMING:
+      if (!healthOk()) break;
+      homingTick();
+      break;
+
     case ST_JOG:
       if (!healthOk()) break;
       if (now >= g_jogUntil) { stopMotion(F("jog done")); break; }
@@ -740,6 +887,7 @@ void loop() {
 
   if (g_state != ST_STEPTEST && now - g_lastTeleMs >= TELEMETRY_MS) {
     g_lastTeleMs = now;
-    if (g_state == ST_MOVING || g_state == ST_JOG) printStatus();
+    if (g_state == ST_MOVING || g_state == ST_JOG ||
+        g_state == ST_HOMING) printStatus();
   }
 }

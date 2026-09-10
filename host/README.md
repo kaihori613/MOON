@@ -45,6 +45,49 @@ fed SNR has no sign to act on. Peaking is a *search* — step, dwell, compare,
 reverse and halve when it gets worse. The sketch runs a PID on **angle**,
 where the error does have a sign, and this side hands it target angles.
 
+### Without a decoder at all
+
+`iq_snr.py` estimates SNR straight from IQ samples. It exists because a
+decoder metric has one limit that matters for pointing: **it only exists once
+the decoder has lock, and lock is exactly what a mispointed dish does not
+have.** A decoder metric can refine an aim you already roughly have; it cannot
+help you find the bird.
+
+**BER is not available this way and cannot be.** Bit error rate is a decoder
+output — measuring it means knowing what the bits should have been, which
+means demodulating, synchronising and running the FEC, at which point you have
+written a decoder and should have used SatDump. From raw IQ you get SNR or
+C/N0. Anything advertised as "BER from the spectrum" is estimating SNR and
+converting through an assumed modulation and code rate.
+
+Two estimators, both checked against synthetic signals of known SNR and
+accurate to better than 0.1 dB across 0–25 dB:
+
+- `snr_m2m4(iq)` — second and fourth moments. **Pure stdlib**, no FFT, no need
+  to know where in the band the signal sits. Assumes a constant-modulus signal
+  (PSK) in Gaussian noise.
+- `snr_psd(iq, fs, signal_bw)` — in-band against out-of-band power density.
+  Needs numpy. Modulation-agnostic, and it rejects interference outside the
+  signal band instead of counting it as signal.
+
+Prefer `snr_psd` where numpy is available; the two disagreeing is itself
+informative.
+
+Note that `snr_m2m4` **refuses** rather than returning a number when the
+moments are within three sigma of pure noise. That matters more than it
+sounds: on noise the estimator would otherwise return something like −10 dB,
+and a search will happily decide −10 beats −11 and climb noise uphill. Its
+usable floor scales as n^-¼ — roughly −2 dB at 10k samples, −9 dB at 1M.
+
+**The SDR is single-client.** While SatDump holds the device nothing here can
+read samples, so the two paths are alternatives in time, not in parallel —
+which fits a scheduled recording exactly:
+
+```
+before SatDump starts  ->  iq_snr, to acquire and coarse-peak
+while SatDump runs     ->  satdump.py, to refine on the decoder metric
+```
+
 ### If you decode with SatDump
 
 `satdump.py` is the same interface over SatDump's HTTP status endpoint:

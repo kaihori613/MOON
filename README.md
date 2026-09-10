@@ -24,6 +24,7 @@ is the first sketch here that does; that part has not been on hardware yet.
 | `as5600_test/` | **Rev B bring-up. Syntax-checked only, never run.** No motor code in it |
 | `actuator_v2/` | **Rev B. Syntax-checked against stubs, never compiled for AVR, never run** |
 | `host/metric.py`, `host/satdump.py` | **Run.** Exercised against synthetic statsd and a stand-in HTTP server; neither has seen a real receiver |
+| `host/iq_snr.py` | **Estimators verified** to 0.06 dB against synthetic signals of known SNR. The capture function has never moved a sample |
 | Rest of `host/` | Written, never executed — no Python on the build machine yet |
 
 An earlier lineage, `actuator_system/`, was deleted in favour of v1. It was
@@ -240,11 +241,30 @@ than continuously — GOES-18 is geostationary, so from a fixed site the look
 angle never changes — and it talks to this sketch by handing it target angles.
 What runs here is a servo on angle, where the error does have a sign.
 
-**Position is absolute and homing is gone.** With that, so are the EEPROM
-position and its check-on-next-home, the travel calibration, the midpoint
-origin, the `a`/`b` compass fit, and the direction-signed counting. Most of
-what was expensive in v1 existed to work around not knowing where the boom
-was.
+**Position is absolute, so homing stops being a prerequisite.** With it go the
+EEPROM position, the travel calibration, the midpoint origin, the `a`/`b`
+compass fit, and the direction-signed counting. Most of what was expensive in
+v1 existed to work around not knowing where the boom was.
+
+**But a home switch is still worth having, for a different job.** The encoder
+is absolute; its *zero* is not. Zero is a raw count in EEPROM, and nothing in
+the encoder can reveal that the magnet has crept on its hub or that the EEPROM
+was wiped — every angle would simply be wrong by a constant, confidently, with
+no symptom. That is the same shape of failure v1 had with a back-driven dish,
+and it gets the same answer: a physical reference you can go and check
+against. The minus limit cam does double duty, so it costs no pin and no part.
+
+- `h` — drive to the cam, compare the encoder against the stored reference,
+  **report the drift and change nothing**
+- `H` — the same, but adopt the reading, re-deriving zero from
+  `HOME_ANGLE_DEG`
+
+Nothing homes at boot and no move requires it. Two details make it usable: the
+approach is two-stage, because a microswitch's trip point moves with approach
+speed and only the slow creep is repeatable; and a microswitch is a *coarse*
+reference, good to a couple of tenths of a degree against the encoder's 0.088.
+That is fine when the pointing requirement is ±1.1°, and it is why the switch
+only ever sets the origin rather than being trusted as a sensor.
 
 **The reed is kept as a witness.** It measures nothing, but it catches two
 failures neither sensor sees alone:
@@ -415,6 +435,9 @@ backlash rather than tighter — see the tuning notes above.
   MPU6050 **cannot measure yaw** — it is a six-axis part with no magnetometer,
   so it cannot replace the compass sighting behind `a` and `b`. What it can
   usefully do instead is in [WIRING.md](WIRING.md).
+- **`HOME_ANGLE_DEG` is a placeholder.** It is the angle the minus cam
+  physically sits at, and homing adopts it as truth, so the whole coordinate
+  system inherits whatever is in there. Measure it against the boom once.
 - **The step-track search does not exist yet.** `actuator_v2/` is the inner
   loop only. `host/metric.py` now supplies the number it would climb — and is
   the first file in `host/` that has actually been executed, against synthetic
