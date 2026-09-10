@@ -246,25 +246,36 @@ EEPROM position, the travel calibration, the midpoint origin, the `a`/`b`
 compass fit, and the direction-signed counting. Most of what was expensive in
 v1 existed to work around not knowing where the boom was.
 
-**But a home switch is still worth having, for a different job.** The encoder
+**A reference switch still earns its place, for a different job.** The encoder
 is absolute; its *zero* is not. Zero is a raw count in EEPROM, and nothing in
 the encoder can reveal that the magnet has crept on its hub or that the EEPROM
 was wiped — every angle would simply be wrong by a constant, confidently, with
 no symptom. That is the same shape of failure v1 had with a back-driven dish,
-and it gets the same answer: a physical reference you can go and check
-against. The minus limit cam does double duty, so it costs no pin and no part.
+and it gets the same answer: a physical reference you can check against.
 
-- `h` — drive to the cam, compare the encoder against the stored reference,
-  **report the drift and change nothing**
-- `H` — the same, but adopt the reading, re-deriving zero from
-  `HOME_ANGLE_DEG`
+**It is a third switch, not one of the cams.** Reusing the −10° limit was the
+first attempt and it was wrong. The cams are hard stops protecting the
+antenna: homing into one drives deliberately into a safety device, wearing the
+cam-to-lever alignment that *is* the protection; it destroys "SW− is tripped"
+as an alarm, because that would also mean "we are homing"; and with the escape
+diodes fitted, current is cut the instant the cam opens, so every home would
+end with the mechanism hard-cut by a safety circuit rather than decelerating
+under control. `actuator_v2` now treats driving into a cam as a **fault**.
 
-Nothing homes at boot and no move requires it. Two details make it usable: the
-approach is two-stage, because a microswitch's trip point moves with approach
-speed and only the slow creep is repeatable; and a microswitch is a *coarse*
-reference, good to a couple of tenths of a degree against the encoder's 0.088.
-That is fine when the pointing requirement is ±1.1°, and it is why the switch
-only ever sets the origin rather than being trusted as a sensor.
+The reference switch sits mid-travel, carries no safety duty, and is crossed
+in transit. That turns checking from a procedure into **passive monitoring** —
+the firmware captures every ordinary crossing and warns only when it drifts.
+
+- `h` — deliberate slow pass in both directions, report drift, change nothing
+- `H` — the same, but adopt the crossings and re-derive zero
+
+**Two references, one per direction.** A microswitch's trip and release points
+differ, so a crossing is only repeatable per direction; each is compared
+against its own stored value. Their difference is the lobe width plus
+hysteresis, a constant of the mechanism and a free diagnostic — if it changes,
+the lever is bending or the cam is loose. Zero is derived from the *midpoint*
+of the two, which cancels the hysteresis rather than inheriting whichever
+direction happened to be captured.
 
 **The reed is kept as a witness.** It measures nothing, but it catches two
 failures neither sensor sees alone:
@@ -435,9 +446,12 @@ backlash rather than tighter — see the tuning notes above.
   MPU6050 **cannot measure yaw** — it is a six-axis part with no magnetometer,
   so it cannot replace the compass sighting behind `a` and `b`. What it can
   usefully do instead is in [WIRING.md](WIRING.md).
-- **`HOME_ANGLE_DEG` is a placeholder.** It is the angle the minus cam
-  physically sits at, and homing adopts it as truth, so the whole coordinate
-  system inherits whatever is in there. Measure it against the boom once.
+- **`REF_ANGLE_DEG` is a placeholder.** It is where the reference switch
+  physically sits, and `H` adopts it as truth, so the whole coordinate system
+  inherits whatever is in there. Measure it against the boom once.
+- **`REF_DRIFT_WARN_DEG` is a placeholder** and needs the switch's own
+  repeatability measured first. Set below that and every ordinary crossing
+  cries wolf; set well above it and real drift goes unreported.
 - **The step-track search does not exist yet.** `actuator_v2/` is the inner
   loop only. `host/metric.py` now supplies the number it would climb — and is
   the first file in `host/` that has actually been executed, against synthetic

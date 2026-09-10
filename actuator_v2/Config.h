@@ -41,7 +41,12 @@ const uint8_t PIN_REED = 2;
 // motor current in hardware; the pins only tell the firmware what the wiring
 // has already done.
 const uint8_t PIN_LIM_POS = 3;
-const uint8_t PIN_LIM_NEG = 4;   // also the HOME reference -- see section 4b
+const uint8_t PIN_LIM_NEG = 4;
+
+// Reference switch, mid-travel. NOT one of the hard stops -- see section 4b
+// for why that distinction is the whole point. D5 is free for it because
+// motor PWM is Timer1 (D9), so nothing here needs Timer0's pins.
+const uint8_t PIN_REF = 5;
 
 const uint8_t PIN_BTN_EXTEND  = A0;
 const uint8_t PIN_BTN_RETRACT = A1;
@@ -138,57 +143,73 @@ const uint8_t SPEED_FLOOR = 60;       // PLACEHOLDER breakaway; below = buzz
 const float SOFT_LIMIT_DEG = 9.0f;
 
 // ===========================================================================
-//  4b. HOMING  --  the minus cam does double duty
+//  4b. REFERENCE SWITCH  --  a THIRD switch, mid-travel
 // ===========================================================================
-//  An absolute encoder does not need homing to know where the boom is, and
-//  nothing here homes at boot. So why keep a home switch at all?
+//  The +/-10 deg cams are HARD STOPS. They exist to protect the antenna, they
+//  cut motor current in hardware, and normal operation must never reach them
+//  -- a cam trip is a fault, not a step in a procedure.
 //
-//  Because the encoder is absolute but its ZERO is not. Zero is a raw count
-//  stored in EEPROM, and there is no way to tell from the encoder alone that
-//  the magnet has crept on its hub, that the EEPROM has been wiped, or that
-//  the sensor has been replaced. Every angle would simply be wrong by a
-//  constant, confidently, with no symptom -- which is the same shape of
-//  failure v1 had with a back-driven dish, and it deserves the same answer:
-//  a physical reference you can go and check against.
+//  So the reference does NOT reuse one of them. An earlier revision did, and
+//  it was wrong for three reasons that all matter more than saving a pin:
 //
-//  So homing here is a CHECK, not a prerequisite:
-//      'h'   drive to the cam, compare the encoder against HOME_RAW,
-//            and report the difference as drift. Changes nothing.
-//      'H'   the same, but adopt the reading -- re-deriving the zero from
-//            HOME_ANGLE_DEG. This is what you run after remounting.
+//    * every home drove deliberately into a safety device, wearing the switch
+//      and, worse, the cam-to-lever alignment that IS the protection;
+//    * "the minus cam is tripped" stopped being an alarm condition, because
+//      it also meant "we are homing" -- so a genuine runaway looked normal;
+//    * the escape diodes cut current the instant the cam opens, so every home
+//      ended with the mechanism hard-cut by a safety circuit rather than
+//      decelerating under control. Twice per home, forever.
 //
-//  The minus cam is reused rather than adding a third switch. It costs no
-//  pin and no part; homing always approaches from the same direction, which
-//  is the same direction-unambiguity argument v1 made for the retract stop;
-//  and being at a boundary it is reachable from anywhere in travel. A switch
-//  in the middle of travel would be crossed constantly during normal moves
-//  and would have to be told apart from a homing trip.
+//  Instead there is a third switch somewhere inside the travel, crossed in
+//  transit and never rested on. It carries no safety duty at all, so driving
+//  across it is free.
 //
-//  A microswitch is a coarse reference -- expect a couple of tenths of a
-//  degree of repeatability against the encoder's 0.088. That is fine here:
-//  the pointing requirement is about +/-1.1 deg, so a home good to 0.2 deg
-//  costs nothing measurable. It is NOT fine as a position sensor, which is
-//  why it only ever sets the origin.
-#define HOME_ON_LIM_NEG 1
+//  WHAT IT IS FOR
+//
+//  The encoder is absolute, but its ZERO is not: zero is a raw count in
+//  EEPROM, and nothing in the encoder can reveal that the magnet has crept on
+//  its hub or that the EEPROM was wiped. Every angle would be wrong by a
+//  constant, confidently, with no symptom. The reference switch is the
+//  physical fact you check that against.
+//
+//  Being mid-travel turns that from a procedure into passive monitoring. The
+//  boom crosses the switch on ordinary moves, so the firmware captures the
+//  crossing every time and compares it -- no homing cycle to remember to run.
+//  'h' forces a deliberate slow pass when you want the authoritative number.
+//
+//  WHY TWO STORED REFERENCES
+//
+//  A microswitch's trip point and release point differ, so the crossing is
+//  only repeatable per DIRECTION. Crossing while moving positive and crossing
+//  while moving negative are two different, individually stable numbers, and
+//  each is compared against its own reference. Their difference is the lobe
+//  width plus hysteresis -- a constant of the mechanism, and a free diagnostic
+//  in its own right: if it changes, the lever is bending or the cam is loose.
+//
+//  Both are captured on the INACTIVE->ACTIVE edge, so the lobe only has to be
+//  entered, never traversed at a known speed.
+#define USE_REF_SWITCH 1
 
-// The angle the minus cam physically sits at. Homing adopts this as the
-// reading at the trip point, so the whole coordinate system is re-derivable
-// from one switch. Measure it once against the boom, not from the drawing.
-const float HOME_ANGLE_DEG = -10.0f;    // PLACEHOLDER
+// Roughly where the switch sits. Only used to plan the deliberate pass; the
+// stored raw counts are what is actually believed. Put it off the angle the
+// dish normally parks at, so the boom is never left resting on the lever.
+const float REF_ANGLE_DEG  = -5.0f;    // PLACEHOLDER
+const float REF_MARGIN_DEG =  1.5f;    // how far clear of it a pass starts
 
-// Two-stage approach. A microswitch's trip point moves with approach speed,
-// so the fast pass only finds the cam and the slow pass is what is believed.
-const uint8_t  HOME_SPEED_FAST  = 110;
-const uint8_t  HOME_SPEED_CREEP = 70;   // must still be above breakaway
-const float    HOME_BACKOFF_DEG = 1.0f; // retreat between the two passes
-const uint16_t HOME_TIMEOUT_MS  = 25000;
+// The deliberate pass crosses slowly, because the capture is polled at the
+// loop rate: at 50 Hz and this duty the boom moves far less than one encoder
+// count between polls, so the latency costs nothing measurable.
+const uint8_t  REF_CROSS_SPEED = 70;   // must still be above breakaway
+const uint16_t REF_TIMEOUT_MS  = 30000;
 
-// Raw count seen at the cam last time it was adopted. 'h' compares against
-// this; drift here means the magnet moved on its hub or the cam did.
-const int16_t HOME_RAW_DEFAULT = -1;    // -1 = never adopted
+// Raw counts seen at the entering edge, per direction. -1 = never adopted.
+const int16_t REF_RAW_POS_DEFAULT = -1;   // captured while moving positive
+const int16_t REF_RAW_NEG_DEFAULT = -1;   // captured while moving negative
 
-// Report drift above this rather than staying quiet about it.
-const float HOME_DRIFT_WARN_DEG = 0.5f;
+// Passive crossings during ordinary moves are compared against the stored
+// reference and reported above this. Set it above the switch's own
+// repeatability or every move will cry wolf.
+const float REF_DRIFT_WARN_DEG = 0.5f;    // PLACEHOLDER -- measure the switch
 
 // ===========================================================================
 //  5. HEALTH  --  what the reed is for now
@@ -247,4 +268,4 @@ const uint16_t STEP_SAMPLE_MS = 40;
 //  the question meaningless.
 #define USE_EEPROM 1
 const int EEPROM_BASE_ADDR = 64;   // clear of v1's block at 0
-const uint32_t EEPROM_MAGIC = 0x4D4F4E43UL;   // "MONC" -- bumped when home_raw was added
+const uint32_t EEPROM_MAGIC = 0x4D4F4E44UL;   // "MOND" -- bumped for the two reference counts

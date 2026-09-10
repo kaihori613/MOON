@@ -151,12 +151,18 @@ float positionDeg() {
 bool limitPos() { return digitalRead(PIN_LIM_POS) == HIGH; }
 bool limitNeg() { return digitalRead(PIN_LIM_NEG) == HIGH; }
 
+// The reference switch carries no safety duty, so unlike the cams it is wired
+// only to this pin -- nothing it does interrupts motor current. Active LOW to
+// GND with INPUT_PULLUP, same as everything else here.
+bool refActive() { return digitalRead(PIN_REF) == LOW; }
+
 // ---------------------------------------------------------------------------
 //  Motor
 // ---------------------------------------------------------------------------
 
 static int      g_duty       = 0;    // signed, what we last commanded
 static int8_t   g_lastSign   = 0;
+static bool     g_limitBlocked = false;  // last call was clipped by a cam
 static unsigned long g_coastUntil = 0;
 
 void motorOff() {
@@ -173,9 +179,12 @@ void driveSigned(int duty) {
   duty = constrain(duty, -(int)SPEED_MAX, (int)SPEED_MAX);
 
   // Hardware already blocks travel into a tripped cam; refusing here too
-  // means the firmware and the wiring agree rather than fighting.
-  if (limitPos() && duty > 0) duty = 0;
-  if (limitNeg() && duty < 0) duty = 0;
+  // means the firmware and the wiring agree rather than fighting. The flag
+  // lets the caller tell "we are escaping a cam" (fine) from "we drove into
+  // one" (a fault), which the duty alone cannot say once it has been zeroed.
+  g_limitBlocked = false;
+  if (limitPos() && duty > 0) { duty = 0; g_limitBlocked = true; }
+  if (limitNeg() && duty < 0) { duty = 0; g_limitBlocked = true; }
 
   const int8_t sign = (duty > 0) ? 1 : (duty < 0 ? -1 : 0);
 
@@ -271,11 +280,11 @@ float pidStep(float target, float meas, float dt) {
 //  State
 // ---------------------------------------------------------------------------
 
-enum State : uint8_t { ST_IDLE, ST_MOVING, ST_JOG, ST_STEPTEST, ST_HOMING, ST_FAULT };
+enum State : uint8_t { ST_IDLE, ST_MOVING, ST_JOG, ST_STEPTEST, ST_REFPASS, ST_FAULT };
 static State g_state = ST_IDLE;
 
 enum Fault : uint8_t {
-  F_NONE = 0, F_STALL, F_LINKAGE, F_ENCODER, F_LIMIT, F_TIMEOUT, F_CURRENT, F_RANGE, F_HOME
+  F_NONE = 0, F_STALL, F_LINKAGE, F_ENCODER, F_LIMIT, F_TIMEOUT, F_CURRENT, F_RANGE, F_REF
 };
 static Fault g_fault = F_NONE;
 
@@ -290,12 +299,15 @@ static float         g_winStartDeg = 0.0f;
 static unsigned long g_lastLoopMs  = 0;
 static unsigned long g_lastTeleMs  = 0;
 
-// homing
-enum HomePhase : uint8_t { HP_CLEAR, HP_SEEK_FAST, HP_RETREAT, HP_SEEK_CREEP };
-static HomePhase g_homePhase = HP_CLEAR;
-static bool      g_homeAdopt = false;
-static float     g_homeRetreatTo = 0.0f;
-static int16_t   g_homeRaw = HOME_RAW_DEFAULT;
+// reference switch
+enum RefPhase : uint8_t { RP_GOTO_START, RP_CROSS_POS, RP_GOTO_END, RP_CROSS_NEG };
+static RefPhase g_refPhase = RP_GOTO_START;
+static bool     g_refAdopt = false;
+static bool     g_refPrev  = false;          // last polled switch state
+static int16_t  g_refRawPos = REF_RAW_POS_DEFAULT;
+static int16_t  g_refRawNeg = REF_RAW_NEG_DEFAULT;
+static int16_t  g_refSeenPos = -1;           // captured during this pass
+static int16_t  g_refSeenNeg = -1;
 
 // step test
 static unsigned long g_stepUntil = 0;
@@ -312,7 +324,7 @@ const __FlashStringHelper *faultName(Fault f) {
     case F_TIMEOUT: return F("timeout");
     case F_CURRENT: return F("current");
     case F_RANGE:   return F("range");
-    case F_HOME:    return F("home");
+    case F_REF:     return F("ref");
   }
   return F("?");
 }
@@ -323,7 +335,7 @@ const __FlashStringHelper *stateName(State s) {
     case ST_MOVING:   return F("MOVING");
     case ST_JOG:      return F("JOG");
     case ST_STEPTEST: return F("STEP");
-    case ST_HOMING:   return F("HOMING");
+    case ST_REFPASS:  return F("REFPASS");
     case ST_FAULT:    return F("FAULT");
   }
   return F("?");
@@ -376,7 +388,9 @@ void printStatus() {
   Serial.print(limitNeg() ? '-' : '.');
   Serial.print(limitPos() ? '+' : '.');
   Serial.print(F(" reed="));   Serial.print(reedPulses());
-  Serial.print(F(" homeraw=")); Serial.print(g_homeRaw);
+  Serial.print(F(" refpos=")); Serial.print(g_refRawPos);
+  Serial.print(F(" refneg=")); Serial.print(g_refRawNeg);
+  Serial.print(F(" ref="));    Serial.print(refActive() ? 1 : 0);
   Serial.print(F(" kp="));     printDeg(g_kp);
   Serial.print(F(" ki="));     printDeg(g_ki);
   Serial.print(F(" kd="));     printDeg(g_kd);
@@ -393,7 +407,8 @@ void printStatus() {
 struct Saved {
   uint32_t magic;
   int16_t  zero;
-  int16_t  homeRaw;
+  int16_t  refPos;
+  int16_t  refNeg;
   float    kp, ki, kd, kff;
 };
 
@@ -401,7 +416,8 @@ void saveSettings() {
   Saved s;
   s.magic = EEPROM_MAGIC;
   s.zero = g_zeroCount;
-  s.homeRaw = g_homeRaw;
+  s.refPos = g_refRawPos;
+  s.refNeg = g_refRawNeg;
   s.kp = g_kp; s.ki = g_ki; s.kd = g_kd; s.kff = g_kff;
   EEPROM.put(EEPROM_BASE_ADDR, s);
   Serial.println(F("saved"));
@@ -412,7 +428,8 @@ void loadSettings() {
   EEPROM.get(EEPROM_BASE_ADDR, s);
   if (s.magic != EEPROM_MAGIC) { Serial.println(F("eeprom: blank, using defaults")); return; }
   g_zeroCount = s.zero;
-  g_homeRaw = s.homeRaw;
+  g_refRawPos = s.refPos;
+  g_refRawNeg = s.refNeg;
   g_kp = s.kp; g_ki = s.ki; g_kd = s.kd; g_kff = s.kff;
   Serial.println(F("eeprom: loaded"));
 }
@@ -461,113 +478,166 @@ void beginJog(int8_t dir, uint16_t ms) {
 }
 
 // ---------------------------------------------------------------------------
-//  Homing -- the minus cam as a zero reference
+//  Reference switch
 // ---------------------------------------------------------------------------
-//  Not a prerequisite for anything. The encoder is absolute, so the boom's
-//  position is known at power-on; what homing establishes is whether the
-//  stored ZERO is still the zero it was. Drift here means the magnet has
-//  crept on its hub or the cam has moved, and there is no other way to see
-//  either.
+//  Not a hard stop, and never confused with one. The +/-10 deg cams protect
+//  the antenna and are a fault when reached; this switch sits inside the
+//  travel, carries no safety duty, and exists only so the stored ZERO can be
+//  checked against a physical fact.
+//
+//  Because it is mid-travel the boom crosses it on ordinary moves, so most
+//  checking is passive -- no procedure to remember. 'h' forces a deliberate
+//  slow pass when the authoritative number is wanted.
 
-void beginHoming(bool adopt) {
+// Called exactly once per tick. Returns true on an inactive->active edge.
+bool refEdge() {
+  const bool now = refActive();
+  const bool entering = (now && !g_refPrev);
+  g_refPrev = now;
+  return entering;
+}
+
+// A crossing during ordinary motion. Free integrity check: if this drifts,
+// the magnet has moved on its hub or the switch has, and nothing else in the
+// system can see either.
+void refPassive(bool entering) {
+  if (!entering || g_duty == 0) return;
+  const bool positive = (g_duty > 0);
+  const int16_t stored = positive ? g_refRawPos : g_refRawNeg;
+  if (stored < 0) return;                       // nothing adopted yet
+
+  const float drift = countsToDeg(angleDiff(g_encRaw, (uint16_t)stored));
+  if (fabs(drift) > REF_DRIFT_WARN_DEG) {
+    Serial.print(F("REF drift "));
+    printDeg(drift);
+    Serial.print(F(" deg on a "));
+    Serial.print(positive ? '+' : '-');
+    Serial.println(F(" crossing -- check the magnet and the switch"));
+  }
+}
+
+void beginRefPass(bool adopt) {
   if (g_state == ST_FAULT) { Serial.println(F("faulted -- 'k' first")); return; }
   if (!g_encOk)            { Serial.println(F("no encoder")); return; }
 
-  g_homeAdopt = adopt;
-  g_homePhase = HP_CLEAR;
+  g_refAdopt = adopt;
+  g_refPhase = RP_GOTO_START;
+  g_refSeenPos = -1;
+  g_refSeenNeg = -1;
   g_moveStarted = millis();
   g_winPulses = reedPulses();
   g_winStartDeg = positionDeg();
   pidReset();
-  g_state = ST_HOMING;
+  g_state = ST_REFPASS;
 
-  Serial.println(adopt ? F("homing -- will ADOPT the reading")
-                       : F("homing -- check only, nothing will change"));
+  Serial.println(adopt ? F("ref pass -- will ADOPT both crossings")
+                       : F("ref pass -- check only, nothing will change"));
 }
 
-void finishHoming(uint16_t tripRaw) {
+void finishRefPass() {
   motorOff();
   g_state = ST_IDLE;
 
-  Serial.print(F("cam at raw ")); Serial.println(tripRaw);
+  Serial.print(F("crossings: +dir raw ")); Serial.print(g_refSeenPos);
+  Serial.print(F("  -dir raw "));          Serial.println(g_refSeenNeg);
 
-  if (g_homeRaw >= 0) {
-    const float drift = countsToDeg(angleDiff(tripRaw, (uint16_t)g_homeRaw));
-    Serial.print(F("drift vs stored: ")); printDeg(drift);
+  if (g_refSeenPos >= 0 && g_refSeenNeg >= 0) {
+    // Lobe width plus switch hysteresis. A constant of the mechanism, so a
+    // change in it means the lever is bending or the cam has worked loose --
+    // which neither crossing on its own would reveal.
+    const float spread = countsToDeg(
+        angleDiff((uint16_t)g_refSeenNeg, (uint16_t)g_refSeenPos));
+    Serial.print(F("lobe+hysteresis: ")); printDeg(spread);
     Serial.println(F(" deg"));
-    if (fabs(drift) > HOME_DRIFT_WARN_DEG) {
-      Serial.println(F("  ^ larger than expected. The magnet has moved on its"));
-      Serial.println(F("    hub, or the cam has. Re-check before trusting angles."));
-    }
-  } else {
-    Serial.println(F("no stored reference yet -- run 'H' to adopt this one"));
   }
 
-  if (g_homeAdopt) {
-    g_homeRaw = (int16_t)tripRaw;
-    // Make this position read HOME_ANGLE_DEG, which re-derives the whole
-    // coordinate system from one switch.
-    g_zeroCount = (int16_t)wrapCount((long)tripRaw - (long)degToCounts(HOME_ANGLE_DEG));
+  bool reported = false;
+  if (g_refRawPos >= 0 && g_refSeenPos >= 0) {
+    Serial.print(F("drift +dir: "));
+    printDeg(countsToDeg(angleDiff((uint16_t)g_refSeenPos, (uint16_t)g_refRawPos)));
+    Serial.println(F(" deg"));
+    reported = true;
+  }
+  if (g_refRawNeg >= 0 && g_refSeenNeg >= 0) {
+    Serial.print(F("drift -dir: "));
+    printDeg(countsToDeg(angleDiff((uint16_t)g_refSeenNeg, (uint16_t)g_refRawNeg)));
+    Serial.println(F(" deg"));
+    reported = true;
+  }
+  if (!reported) Serial.println(F("no stored reference yet -- 'H' to adopt"));
+
+  if (g_refAdopt) {
+    if (g_refSeenPos < 0 || g_refSeenNeg < 0) {
+      Serial.println(F("did not see both crossings -- nothing adopted"));
+      return;
+    }
+    g_refRawPos = g_refSeenPos;
+    g_refRawNeg = g_refSeenNeg;
+    // Zero is derived from the midpoint of the two crossings, which cancels
+    // the switch's hysteresis instead of inheriting whichever direction
+    // happened to be captured.
+    const int16_t half = angleDiff((uint16_t)g_refSeenNeg, (uint16_t)g_refSeenPos) / 2;
+    const uint16_t mid = wrapCount((long)g_refSeenPos + half);
+    g_zeroCount = (int16_t)wrapCount((long)mid - (long)degToCounts(REF_ANGLE_DEG));
     Serial.print(F("adopted. zero=")); Serial.print(g_zeroCount);
     Serial.print(F("  position now ")); printDeg(positionDeg());
     Serial.println(F(" deg -- 'w' to save"));
   }
 }
 
-// Returns true when the run is over (done or faulted).
-void homingTick() {
-  if (millis() - g_moveStarted > HOME_TIMEOUT_MS) {
-    Serial.println(F("homing found no cam"));
-    raiseFault(F_HOME);
+void refPassTick(bool entering) {
+  if (millis() - g_moveStarted > REF_TIMEOUT_MS) {
+    Serial.println(F("ref pass never found the switch"));
+    raiseFault(F_REF);
     return;
   }
 
-  switch (g_homePhase) {
+  const float pos = positionDeg();
+  const float startAt = REF_ANGLE_DEG - REF_MARGIN_DEG;
+  const float endAt   = REF_ANGLE_DEG + REF_MARGIN_DEG;
 
-    case HP_CLEAR:
-      // Start clear of the switch, so the fast seek always arrives at it
-      // from the same side.
-      if (limitNeg()) {
-        driveSigned((int)HOME_SPEED_FAST);
-      } else {
+  switch (g_refPhase) {
+
+    case RP_GOTO_START:
+      // Get clear of the switch on the negative side, so the first crossing
+      // is always entered from the same direction.
+      if (pos <= startAt && !refActive()) {
         motorOff();
-        g_homePhase = HP_SEEK_FAST;
+        g_refPhase = RP_CROSS_POS;
         g_moveStarted = millis();
+      } else {
+        driveSigned(pos > startAt ? -(int)SPEED_SLOW : (int)REF_CROSS_SPEED);
       }
       break;
 
-    case HP_SEEK_FAST:
-      if (limitNeg()) {
-        motorOff();
-        // Only a rough fix -- a microswitch's trip point moves with approach
-        // speed, so this pass exists to find the cam, not to be believed.
-        g_homeRetreatTo = positionDeg() + HOME_BACKOFF_DEG;
-        g_homePhase = HP_RETREAT;
+    case RP_CROSS_POS:
+      if (entering) {
+        g_refSeenPos = (int16_t)g_encRaw;
+        Serial.print(F("  +dir crossing at raw ")); Serial.println(g_refSeenPos);
+        g_refPhase = RP_GOTO_END;
         g_moveStarted = millis();
       } else {
-        driveSigned(-(int)HOME_SPEED_FAST);
+        driveSigned((int)REF_CROSS_SPEED);
       }
       break;
 
-    case HP_RETREAT:
-      if (!limitNeg() && positionDeg() >= g_homeRetreatTo) {
+    case RP_GOTO_END:
+      if (pos >= endAt && !refActive()) {
         motorOff();
-        g_homePhase = HP_SEEK_CREEP;
+        g_refPhase = RP_CROSS_NEG;
         g_moveStarted = millis();
       } else {
-        driveSigned((int)HOME_SPEED_FAST);
+        driveSigned((int)REF_CROSS_SPEED);
       }
       break;
 
-    case HP_SEEK_CREEP:
-      if (limitNeg()) {
-        // This is the reading that counts. At creep speed the carriage moves
-        // far less than the encoder's resolution in one loop period, so the
-        // 20 ms of polling latency between the switch closing and this read
-        // costs nothing measurable.
-        finishHoming(g_encRaw);
+    case RP_CROSS_NEG:
+      if (entering) {
+        g_refSeenNeg = (int16_t)g_encRaw;
+        Serial.print(F("  -dir crossing at raw ")); Serial.println(g_refSeenNeg);
+        finishRefPass();
       } else {
-        driveSigned(-(int)HOME_SPEED_CREEP);
+        driveSigned(-(int)REF_CROSS_SPEED);
       }
       break;
   }
@@ -631,8 +701,8 @@ void printHelp() {
   Serial.println(F("  e <ms>     open-loop jog   r <ms>"));
   Serial.println(F("  m          monitor raw encoder (check mounting/invert)"));
   Serial.println(F("  z          set zero here"));
-  Serial.println(F("  h          home to the minus cam and report drift"));
-  Serial.println(F("  H          home and ADOPT it as the zero reference"));
+  Serial.println(F("  h          cross the reference switch, report drift"));
+  Serial.println(F("  H          cross it and ADOPT the crossings as zero"));
   Serial.println(F("  p/i/d/f <v> set kp/ki/kd/kff live"));
   Serial.println(F("  t <deg>    step test, CSV out"));
   Serial.println(F("  n          reed noise floor"));
@@ -700,8 +770,8 @@ void handleLine(char *s) {
       Serial.println(g_zeroCount);
       break;
 
-    case 'h': beginHoming(false); break;   // check the zero
-    case 'H': beginHoming(true);  break;   // adopt this cam reading as the zero
+    case 'h': beginRefPass(false); break;  // check the zero against the switch
+    case 'H': beginRefPass(true);  break;  // adopt this pass as the reference
 
     case 'p': if (hasArg) { g_kp  = fv; Serial.println(F("kp set"));  } break;
     case 'i': if (hasArg) { g_ki  = fv; pidReset(); Serial.println(F("ki set")); } break;
@@ -766,6 +836,7 @@ void setup() {
   pinMode(PIN_REED,    INPUT_PULLUP);
   pinMode(PIN_LIM_POS, INPUT_PULLUP);
   pinMode(PIN_LIM_NEG, INPUT_PULLUP);
+  pinMode(PIN_REF,     INPUT_PULLUP);
 #if USE_BUTTONS
   pinMode(PIN_BTN_EXTEND,  INPUT_PULLUP);
   pinMode(PIN_BTN_RETRACT, INPUT_PULLUP);
@@ -797,6 +868,7 @@ void setup() {
   }
 
   encoderPoll();
+  g_refPrev = refActive();   // so boot never looks like a crossing
   if (!g_encOk) {
     raiseFault(F_ENCODER);
   } else {
@@ -818,6 +890,10 @@ void loop() {
   g_lastLoopMs = now;
 
   encoderPoll();
+
+  // Exactly one edge poll per tick -- calling refEdge() twice would eat the
+  // transition and the crossing would silently never be seen.
+  const bool refEntering = refEdge();
 
   switch (g_state) {
 
@@ -844,6 +920,12 @@ void loop() {
       }
 
       driveSigned(out);
+      refPassive(refEntering);
+
+      // Driving INTO a cam is a fault. The cams are hard stops protecting the
+      // antenna, not waypoints, so reaching one under a normal move means
+      // something is wrong -- the soft limit should have stopped it first.
+      if (g_limitBlocked) { raiseFault(F_LIMIT); break; }
 
       if (g_state == ST_STEPTEST) {
         if (now >= g_stepNext) {
@@ -867,15 +949,19 @@ void loop() {
       break;
     }
 
-    case ST_HOMING:
+    case ST_REFPASS:
       if (!healthOk()) break;
-      homingTick();
+      refPassTick(refEntering);
       break;
 
     case ST_JOG:
       if (!healthOk()) break;
       if (now >= g_jogUntil) { stopMotion(F("jog done")); break; }
       driveSigned(g_jogDuty);
+      refPassive(refEntering);
+      // A jog into a cam faults too; a jog AWAY from one is how you escape,
+      // and driveSigned does not flag that.
+      if (g_limitBlocked) { raiseFault(F_LIMIT); }
       break;
 
     case ST_IDLE:
@@ -888,6 +974,6 @@ void loop() {
   if (g_state != ST_STEPTEST && now - g_lastTeleMs >= TELEMETRY_MS) {
     g_lastTeleMs = now;
     if (g_state == ST_MOVING || g_state == ST_JOG ||
-        g_state == ST_HOMING) printStatus();
+        g_state == ST_REFPASS) printStatus();
   }
 }

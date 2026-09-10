@@ -13,11 +13,11 @@ is still in git history and `actuator_v1/` still runs it.
 | | Rev A | Rev B |
 |---|---|---|
 | Position | reed pulses, signed by commanded direction | AS5600 absolute angle on the pivot |
-| Homing | drive into the retract cam every boot, required before any move | on demand only, as a check that the stored zero is still right |
+| Homing | drive into the retract cam every boot, required before any move | no homing; a separate mid-travel reference switch checks the stored zero |
 | Bridge | L298N | Pololu G2 24v13 |
 | Reed | the position sensor | motion witness only |
 | IMU | MPU6050 planned | dropped |
-| Limits | actuator's internal cams only | cams at ±10° that cut current; the minus one doubles as home |
+| Limits | actuator's internal cams only | cams at ±10° that cut current, plus the actuator's own |
 
 Three things drove it. The reed had no direction and sat on the motor side of
 the leadscrew backlash, so it measured the wrong quantity in the wrong place.
@@ -31,7 +31,8 @@ L298N is a 2 A part with a 2–3 V drop being asked to run a jack at 25 V.
 | D0, D1 | USB serial | Console, and the target-angle channel from the host |
 | D2 | Reed switch | **INT0.** Health witness — nothing integrates it any more |
 | D3 | Limit flag, +10° | NC to GND, `INPUT_PULLUP` |
-| D4 | Limit flag, −10° | NC to GND, `INPUT_PULLUP`. **Also the home reference** |
+| D4 | Limit flag, −10° | NC to GND, `INPUT_PULLUP` |
+| D5 | **Reference switch** | Mid-travel, to GND. Not a stop — see below |
 | D7 | Driver DIR | |
 | D8 | Driver **/SLP** | **Must be driven HIGH** or the bridge stays asleep |
 | D9 | Driver PWM | Timer1 |
@@ -40,7 +41,7 @@ L298N is a 2 A part with a 2–3 V drop being asked to run a jack at 25 V.
 | A3 | Driver current sense | Analog. Stall detection, free with this driver |
 | A4 | I2C SDA | AS5600 at 0x36, through a level shifter |
 | A5 | I2C SCL | " |
-| D5, D6, D10, D12, D13 | free | Five spare |
+| D6, D10, D12, D13 | free | Four spare |
 
 **I2C is A4/A5 and cannot be moved.** `Wire` on a 328P is tied to that
 peripheral. An encoder on any other pin will not enumerate.
@@ -121,39 +122,6 @@ by a power diode, with the diodes facing opposite ways:
 Use **normally-closed** contacts so a broken wire reads as a tripped limit
 rather than as permission to keep going.
 
-### The minus cam is also the home reference
-
-`SW−` does double duty. No third switch, no extra pin.
-
-The encoder is absolute, but its **zero is not** — zero is a raw count in
-EEPROM, and nothing in the encoder can tell you the magnet has crept on its
-hub or that the EEPROM was wiped. Every angle would be wrong by a constant,
-confidently, with no symptom. So the firmware can drive to the minus cam and
-compare what the encoder reads there against a stored reference:
-
-- `h` — go to the cam, report the drift, change nothing
-- `H` — go to the cam and **adopt** the reading, re-deriving zero from
-  `HOME_ANGLE_DEG`
-
-Nothing homes at boot, and no move requires it. It is a check you run after
-remounting or when an angle looks wrong.
-
-Two details make it work:
-
-**Approach from one side, twice.** A microswitch's trip point moves with
-approach speed, so the firmware clears the switch, seeks it fast, retreats
-1°, then creeps back at `HOME_SPEED_CREEP`. Only the creep pass is believed.
-
-**A microswitch is a coarse reference** — expect a couple of tenths of a
-degree of repeatability against the encoder's 0.088°. That is fine here,
-because the pointing requirement is about ±1.1°, so a home good to 0.2°
-costs nothing measurable. It is *not* fine as a position sensor, which is
-why it only ever sets the origin.
-
-The escape diodes and homing get along: the approach drives into the cam
-until the hardware cuts that direction, and the retreat drives back out
-through the diode.
-
 Size the diodes for **full motor current** — they carry it whenever you are
 driving off a limit — so a 15 A, 45 V Schottky on a small heatsink, not a
 1N4007. At a few amps and ~0.5 V the escape path dissipates a couple of watts,
@@ -163,6 +131,75 @@ which is fine briefly and not fine continuously.
 round they go depends on how the motor happens to be wired, and one fitted
 backwards traps you at exactly the limit it was meant to let you escape. Drive
 onto each cam slowly and confirm you can still drive off it.
+
+## The reference switch
+
+A **third** switch, mid-travel, on D5. It is deliberately not one of the cams.
+
+### Why not reuse a limit switch
+
+It is tempting — no extra part, no extra pin — and it is wrong:
+
+- **The cams are hard stops.** They protect the antenna and normal operation
+  must never reach them. Homing into one drives deliberately into a safety
+  device, wearing the switch and, worse, the cam-to-lever alignment that *is*
+  the protection.
+- **It destroys the alarm.** If "SW− is tripped" also means "we are homing",
+  a genuine runaway looks like a routine procedure.
+- **The escape diodes make it violent.** Current is cut the instant the cam
+  opens, so every home ends with the mechanism hard-cut by a safety circuit
+  rather than decelerating under control. Twice per home, forever.
+
+The reference switch carries no safety duty and is wired only to its pin —
+nothing it does interrupts motor current — so crossing it is free.
+
+### What it is for
+
+The encoder is absolute, but **its zero is not**. Zero is a raw count in
+EEPROM, and nothing in the encoder can reveal that the magnet has crept on its
+hub or that the EEPROM was wiped. Every angle would be wrong by a constant,
+confidently, with no symptom. This switch is the physical fact you check it
+against.
+
+Being mid-travel turns that from a procedure into **passive monitoring**: the
+boom crosses the switch during ordinary moves, so the firmware captures every
+crossing and compares it — no homing cycle to remember to run. It prints a
+warning only when the drift exceeds `REF_DRIFT_WARN_DEG`.
+
+- `h` — deliberate slow pass across the switch in both directions, report
+  drift and change nothing
+- `H` — the same, but adopt the crossings and re-derive zero
+
+### Two references, one per direction
+
+A microswitch's trip and release points differ, so a crossing is only
+repeatable **per direction**. Crossing while moving positive and crossing
+while moving negative are two different, individually stable numbers, and each
+is compared against its own stored reference.
+
+Their difference is the lobe width plus hysteresis — a constant of the
+mechanism, and a free diagnostic in its own right. If it changes, the lever is
+bending or the cam has worked loose, which neither crossing alone would show.
+
+Zero is derived from the **midpoint** of the two, which cancels the hysteresis
+instead of inheriting whichever direction happened to be captured.
+
+### Placing it
+
+Put it where the boom passes through but never parks — `REF_ANGLE_DEG`
+defaults to −5°. A switch at the normal operating angle would be rested on,
+and a lever sitting at its own trip point chatters and reads ambiguously.
+
+Both crossings are taken on the **inactive→active** edge, so the cam lobe only
+has to be entered, never traversed at a known speed.
+
+## Hard stops
+
+The ±10° cams are now purely protective. `actuator_v2` treats driving into one
+as a **fault**, not a waypoint: the soft limit at ±9° should have stopped the
+move first, so reaching a cam means something went wrong. Clear it with `k`
+and jog away — the firmware blocks the direction that would go further in and
+allows the one that escapes.
 
 ## Power
 
@@ -280,7 +317,11 @@ motor PWM is Timer1 on D9.
 4. **Wire the two grounds to the supply negative separately.**
 5. **Fit C1 and C2 at the driver's supply terminals**, watching C1's polarity.
 6. **Limits and escape diodes**, then drive onto each cam by hand and confirm
-   you can drive off it.
-7. **`actuator_v2/` with the loop disabled** — jog with `e`/`r` only, and
+   you can drive off it. After this, nothing should reach a cam again in
+   normal use.
+7. **Fit the reference switch** somewhere the boom crosses but never parks,
+   and run `H` to adopt it. Note the lobe+hysteresis figure it prints — that
+   is the number `REF_DRIFT_WARN_DEG` has to sit above.
+8. **`actuator_v2/` with the loop disabled** — jog with `e`/`r` only, and
    watch `m` to confirm the encoder moves the way you expect under power.
-8. **Then tune.** The procedure is in the README.
+9. **Then tune.** The procedure is in the README.
