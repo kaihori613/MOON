@@ -39,6 +39,62 @@ were built to produce — breakaway duty, stroke time each way, coast after stop
 The single actuator is assigned to **yaw**. The field test on 11 Aug 2026 showed
 yaw needs tighter pointing than pitch, so pitch stays set by hand.
 
+## Which input is in charge
+
+Two sensors could plausibly be called the main input, and it is worth being
+exact about it, because the answer decides what happens when either one goes
+away.
+
+**The AS5600 is the main input.** It is the only thing the actuator is ever
+commanded against — every PWM value and every direction bit in the system
+comes from it, and nothing else is in that loop.
+
+**The signal metric never touches the motor.** All it can do is change *what
+number the encoder loop is aiming at*. It is a setpoint generator, not a
+feedback signal. Cruise control is the shape of it: the speedometer is the
+feedback, and the speed you dialled in is the setpoint.
+
+The asymmetry that settles it:
+
+> The whole positioning system runs with **no receiver at all**. It cannot run
+> for one second with **no encoder**.
+
+Unplug the SDR and the dish still points, holds, respects its limits and
+reports its angle. Lose the encoder and the axis is blind, so `actuator_v2`
+raises `F_ENCODER` and stops — feeding a stale angle to the PID is worse than
+not moving.
+
+| | AS5600 | Signal metric |
+|---|---|---|
+| Rate | 50 Hz, continuous | ~0.2 Hz, on demand |
+| Runs on | the Arduino | the host |
+| Drives | PWM and direction, directly | the target angle, and nothing else |
+| Available | always | only under lock |
+| When it is lost | fault, motor stopped | hold the last target; the dish stays pointed |
+
+### Where a target angle comes from
+
+Three sources, in descending authority:
+
+1. **Manual** — you typed `g -3.2`
+2. **The stored trim** — what the signal search produced, once
+3. **The geometry model** — computed from the site and 137.0°W
+
+### For a geostationary bird, the metric is a calibration input
+
+Not a runtime one. GOES-18 does not move relative to a fixed site, so the
+search runs rarely, produces one number, and is then not needed again. Day to
+day the system points from encoder plus geometry plus stored trim, with the
+receiver contributing nothing to where the dish goes.
+
+The metric's whole job is to correct source 3 into source 2, permanently.
+`host/config.py` stores a trim rather than a position for exactly this reason:
+a position is invalidated by the next recompute, a trim survives it.
+
+So if one sensor is the heart of the machine, it is the encoder. The signal
+path is what tells you, once, that the encoder's zero is aimed at the right
+patch of sky.
+
 ## Sketches
 
 ### `reed_switch_test/`
@@ -333,11 +389,15 @@ same `key=value` status format, with three differences:
 
 - **`g <n>` takes degrees, not counts.** Status carries `unit=deg` so a host
   can tell which sketch it is talking to.
-- **`h` (home) is a no-op** that says so, rather than an error.
+- **`h` no longer homes into a stop.** It runs a reference pass across the
+  mid-travel switch and reports drift, changing nothing. `H` is the version
+  that adopts the result.
 - **`c` (calibrate) is an alias for `z`**, set-zero-here.
 
-`link.py` has gained `move_to_deg()` alongside `move_to()`. Nothing in
-`host/` has been executed.
+`link.py` has gained `move_to_deg()`, `unit_is_degrees()`, `set_zero()`,
+`set_gain()` and `save_settings()` alongside `move_to()`, and `status()` now
+parses both revisions. Only `metric.py`, `satdump.py` and `iq_snr.py` have
+ever been executed; the rest of `host/` has not.
 
 ### `host/`
 
@@ -346,7 +406,7 @@ from the site coordinates, drives yaw there, then hands the keyboard over for
 manual peaking with the arrow keys.
 
 The manual step stores a **trim** — an offset added to every computed target —
-rather than a position, so re-homing or recomputing does not discard it. GOES-18
+rather than a position, so recomputing the look angle does not discard it. GOES-18
 is geostationary, so from a fixed site the look angle never changes: peak once
 and the trim is a permanent site correction.
 
@@ -354,34 +414,41 @@ The satellite math lives here rather than in the sketch because it wants
 floating-point trig and a config file. See [host/README.md](host/README.md) for
 the linkage calibration procedure.
 
-## Two things worth knowing before reading the code
+## Three things worth knowing before reading the code
 
 **The reed switch counts, it does not tell direction.** That is why Rev B
 stopped using it for position. In `actuator_v1/` position is pulses signed by
 the direction last commanded, which is correct only as long as nothing
 back-drives the actuator while the motor is off — and wind on a dish does
-exactly that, with no symptom. In `actuator_v2/` the reed measures nothing;
-see the health section below.
+exactly that, with no symptom. In `actuator_v2/` the reed measures nothing; it
+witnesses, as described under `actuator_v2/` above.
 
-**The cam limit switches are not wired to the Arduino.** They cut motor
-current internally at both extremes. So "we reached the end" is inferred from
-pulses stopping while motion is still commanded — the same signature as a jam,
-which is why every stall stops the motor immediately.
+**There are two different sets of cams, and only one is wired to the
+Arduino.** The actuator has its own internal cams at the ends of the stroke,
+which cut motor current themselves and are not connected to anything — so from
+outside, "we reached the end" can only be inferred from the reed going quiet
+while motion is still commanded, which is the same signature as a jam. That is
+why a stall stops the motor immediately rather than trying to tell the two
+apart. Separate from those, Rev B adds **cam switches at ±10°** on the pivot,
+which do report to D3 and D4 as well as cutting current in hardware.
 
-**The cams have been confirmed to cut on the bench.** That matters more than it
-sounds: the whole end-of-travel inference above was being taken on faith, and
-homing drives deliberately into a stop expecting something to cut current
-before the winding does. It also means a run into an end is a normal ending
-rather than a stall against a mechanical stop.
+**The internal cams have been confirmed to cut on the bench.** The whole
+end-of-travel inference above was being taken on faith before that, and it
+also means a run into an end is a normal ending rather than a stall against a
+mechanical stop. What it does not establish is *where* they cut, or whether
+they cut in the same place twice.
 
-What it does *not* establish is where they cut, or whether they cut in the same
-place twice — see the open issue below.
+That last point used to matter a great deal, because Rev A called one of those
+stops zero. It no longer does: the encoder is absolute and its zero is checked
+against the mid-travel reference switch instead, so end-stop repeatability has
+stopped being load-bearing. Nothing in `actuator_v2/` ever drives into a stop
+on purpose.
 
 ## Wiring
 
 [WIRING.md](WIRING.md) is the pin map, the power scheme and the grounding.
 Read the grounding section before wiring anything: the Arduino ground must
-star at the supply negative rather than hang off the L298N's GND terminal,
+star at the supply negative rather than hang off the driver's GND terminal,
 because that terminal carries the motor return current and the drop along it
 lands on the reed input.
 
@@ -407,9 +474,14 @@ backlash rather than tighter — see the tuning notes above.
 
 ## Known open issues
 
-- **Nothing in `host/` has ever been executed** — there is no Python on the
-  build machine. `test_geometry.py` was written alongside the math but has not
-  been run, so treat the pointing angles as unchecked until it passes.
+- **Most of `host/` has never been executed** — there is no Python on the
+  build machine. `metric.py`, `satdump.py` and `iq_snr.py` have been run
+  against synthetic inputs, but `geometry.py`, `config.py`, `link.py` and
+  `moon_yaw.py` have not, and `test_geometry.py` has never passed. Treat the
+  pointing angles as unchecked until it does.
+- **No part of `host/` has met real hardware.** The estimators were checked
+  against synthetic signals and the metric sources against stand-in servers;
+  none of it has seen a receiver, an SDR or a serial port.
 - **End-stop repeatability no longer matters, and that is the main thing Rev B
   bought.** Rev A called the retract stop zero, so a stop that landed a few
   counts different each time moved the whole coordinate system with it. An
@@ -424,7 +496,7 @@ backlash rather than tighter — see the tuning notes above.
   to calibrate `LINKAGE_MIN_DEG` for the broken-linkage check.
 - Reed noise rejection is debounce-only, and the noise floor has only been
   measured with no bridge in the circuit — which is the one configuration where
-  a clean result proves nothing. `actuator_v1/` carries the test over as `n` so
+  a clean result proves nothing. `actuator_v2/` carries the test over as `n` so
   it can be re-run with the driver powered; do that before trusting any move. If
   pickup appears, the fix is 4.7k pull-up to 5V, 220R in series with the reed,
   220nF to ground at the pin, and a shared ground that does not carry motor
