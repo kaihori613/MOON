@@ -280,7 +280,7 @@ float pidStep(float target, float meas, float dt) {
 //  State
 // ---------------------------------------------------------------------------
 
-enum State : uint8_t { ST_IDLE, ST_MOVING, ST_JOG, ST_STEPTEST, ST_REFPASS, ST_FAULT };
+enum State : uint8_t { ST_IDLE, ST_MOVING, ST_JOG, ST_MANUAL, ST_STEPTEST, ST_REFPASS, ST_FAULT };
 static State g_state = ST_IDLE;
 
 enum Fault : uint8_t {
@@ -298,6 +298,12 @@ static unsigned long g_winPulses   = 0;
 static float         g_winStartDeg = 0.0f;
 static unsigned long g_lastLoopMs  = 0;
 static unsigned long g_lastTeleMs  = 0;
+
+// Who last commanded the axis. Not a permission system -- every command is
+// still accepted -- but the host needs to know it was pre-empted by someone
+// at the panel, and "why did my move stop" should have an answer.
+enum Owner : uint8_t { OWN_LOCAL, OWN_REMOTE };
+static Owner g_owner = OWN_LOCAL;
 
 // reference switch
 enum RefPhase : uint8_t { RP_GOTO_START, RP_CROSS_POS, RP_GOTO_END, RP_CROSS_NEG };
@@ -334,6 +340,7 @@ const __FlashStringHelper *stateName(State s) {
     case ST_IDLE:     return F("IDLE");
     case ST_MOVING:   return F("MOVING");
     case ST_JOG:      return F("JOG");
+    case ST_MANUAL:   return F("MANUAL");
     case ST_STEPTEST: return F("STEP");
     case ST_REFPASS:  return F("REFPASS");
     case ST_FAULT:    return F("FAULT");
@@ -391,6 +398,7 @@ void printStatus() {
   Serial.print(F(" refpos=")); Serial.print(g_refRawPos);
   Serial.print(F(" refneg=")); Serial.print(g_refRawNeg);
   Serial.print(F(" ref="));    Serial.print(refActive() ? 1 : 0);
+  Serial.print(F(" owner="));  Serial.print(g_owner == OWN_LOCAL ? F("local") : F("remote"));
   Serial.print(F(" kp="));     printDeg(g_kp);
   Serial.print(F(" ki="));     printDeg(g_ki);
   Serial.print(F(" kd="));     printDeg(g_kd);
@@ -443,6 +451,7 @@ void loadSettings() {}
 // ---------------------------------------------------------------------------
 
 void beginMove(float targetDeg) {
+  g_owner = OWN_REMOTE;
   if (g_state == ST_FAULT) { Serial.println(F("faulted -- 'k' first")); return; }
   if (!g_encOk)            { Serial.println(F("no encoder")); return; }
 
@@ -467,6 +476,7 @@ void beginMove(float targetDeg) {
 }
 
 void beginJog(int8_t dir, uint16_t ms) {
+  g_owner = OWN_REMOTE;
   if (g_state == ST_FAULT) { Serial.println(F("faulted -- 'k' first")); return; }
   ms = constrain(ms, 1, JOG_MS_MAX);
   g_jogDuty = dir > 0 ? (int)SPEED_SLOW : -(int)SPEED_SLOW;
@@ -476,6 +486,37 @@ void beginJog(int8_t dir, uint16_t ms) {
   g_winStartDeg = positionDeg();
   g_state = ST_JOG;
 }
+
+// ---------------------------------------------------------------------------
+//  Panel buttons -- manual mode
+// ---------------------------------------------------------------------------
+//  Human-timescale debounce, which is a completely different problem from the
+//  reed's: no interrupt, no series resistor, no capacitor. Just refuse to
+//  believe a change until it has held for BTN_DEBOUNCE_MS.
+
+#if USE_BUTTONS
+struct Button {
+  uint8_t  pin;
+  bool     stable;        // debounced state, true = pressed
+  bool     last;          // last raw read
+  unsigned long changed;  // when the raw read last differed
+};
+
+static Button g_btnExtend  = {PIN_BTN_EXTEND,  false, false, 0};
+static Button g_btnRetract = {PIN_BTN_RETRACT, false, false, 0};
+static Button g_btnStop    = {PIN_BTN_STOP,    false, false, 0};
+
+// Returns true on the rising edge of a debounced press.
+bool buttonPoll(Button &b) {
+  const bool raw = (digitalRead(b.pin) == LOW);   // to GND, INPUT_PULLUP
+  const unsigned long now = millis();
+  if (raw != b.last) { b.last = raw; b.changed = now; return false; }
+  if (now - b.changed < BTN_DEBOUNCE_MS) return false;
+  if (raw == b.stable) return false;
+  b.stable = raw;
+  return raw;                                     // edge, and it is a press
+}
+#endif
 
 // ---------------------------------------------------------------------------
 //  Reference switch
@@ -517,6 +558,7 @@ void refPassive(bool entering) {
 }
 
 void beginRefPass(bool adopt) {
+  g_owner = OWN_REMOTE;
   if (g_state == ST_FAULT) { Serial.println(F("faulted -- 'k' first")); return; }
   if (!g_encOk)            { Serial.println(F("no encoder")); return; }
 
@@ -644,6 +686,88 @@ void refPassTick(bool entering) {
 }
 
 // ---------------------------------------------------------------------------
+//  Manual mode
+// ---------------------------------------------------------------------------
+
+#if USE_BUTTONS
+static int8_t g_manualDir = 0;
+
+// Called every tick, ahead of the state machine, so a press pre-empts
+// whatever else was running. Returns true if the buttons now own the axis.
+bool handleButtons() {
+  const bool stopEdge    = buttonPoll(g_btnStop);
+  const bool extendEdge  = buttonPoll(g_btnExtend);
+  const bool retractEdge = buttonPoll(g_btnRetract);
+
+  if (stopEdge) {
+    g_owner = OWN_LOCAL;
+    g_manualDir = 0;
+    stopMotion(F("panel STOP"));
+    return true;
+  }
+
+  // Both at once is ambiguous, so it means stop rather than guessing.
+  if (g_btnExtend.stable && g_btnRetract.stable) {
+    if (g_state == ST_MANUAL) { g_manualDir = 0; stopMotion(F("both buttons")); }
+    return g_state == ST_MANUAL;
+  }
+
+  if (extendEdge || retractEdge) {
+    if (g_state == ST_FAULT) {
+      Serial.println(F("faulted -- 'k' first"));
+      return false;
+    }
+    // Whoever is at the panel is standing next to the dish; the host is not.
+    if (g_state != ST_IDLE && g_state != ST_MANUAL) {
+      Serial.println(F("panel took over"));
+    }
+    g_owner = OWN_LOCAL;
+    g_manualDir = extendEdge ? +1 : -1;
+    g_moveStarted = millis();
+    g_winPulses = reedPulses();
+    g_winStartDeg = positionDeg();
+    pidReset();
+    g_state = ST_MANUAL;
+    return true;
+  }
+
+  return g_state == ST_MANUAL;
+}
+
+// Hold-to-run. Released is stopped, that instant -- which is the entire
+// reason these are buttons and not a serial command.
+void manualTick() {
+  const bool held = (g_manualDir > 0) ? g_btnExtend.stable : g_btnRetract.stable;
+  if (!held || g_manualDir == 0) {
+    g_manualDir = 0;
+    motorOff();
+    g_state = ST_IDLE;
+    Serial.print(F("manual stop at "));
+    printDeg(positionDeg());
+    Serial.println(F(" deg"));
+    return;
+  }
+
+  // Soft limits apply to manual driving too. The cams are a backstop, not a
+  // thing to steer by, and holding a button is not a reason to reach one.
+  const float pos = positionDeg();
+  if ((g_manualDir > 0 && pos >= SOFT_LIMIT_DEG) ||
+      (g_manualDir < 0 && pos <= -SOFT_LIMIT_DEG)) {
+    g_manualDir = 0;
+    motorOff();
+    g_state = ST_IDLE;
+    Serial.print(F("soft limit at "));
+    printDeg(pos);
+    Serial.println(F(" deg"));
+    return;
+  }
+
+  driveSigned(g_manualDir > 0 ? (int)SPEED_BUTTON : -(int)SPEED_BUTTON);
+  if (g_limitBlocked) raiseFault(F_LIMIT);
+}
+#endif
+
+// ---------------------------------------------------------------------------
 //  Health checks, run on every tick while the motor is commanded on
 // ---------------------------------------------------------------------------
 
@@ -701,6 +825,7 @@ void printHelp() {
   Serial.println(F("  e <ms>     open-loop jog   r <ms>"));
   Serial.println(F("  m          monitor raw encoder (check mounting/invert)"));
   Serial.println(F("  z          set zero here"));
+  Serial.println(F("  (panel)    hold extend/retract to jog; STOP aborts anything"));
   Serial.println(F("  h          cross the reference switch, report drift"));
   Serial.println(F("  H          cross it and ADOPT the crossings as zero"));
   Serial.println(F("  p/i/d/f <v> set kp/ki/kd/kff live"));
@@ -895,6 +1020,11 @@ void loop() {
   // transition and the crossing would silently never be seen.
   const bool refEntering = refEdge();
 
+#if USE_BUTTONS
+  // Ahead of the state machine on purpose: a press pre-empts a host move.
+  handleButtons();
+#endif
+
   switch (g_state) {
 
     case ST_MOVING:
@@ -954,6 +1084,14 @@ void loop() {
       refPassTick(refEntering);
       break;
 
+#if USE_BUTTONS
+    case ST_MANUAL:
+      if (!healthOk()) break;
+      manualTick();
+      refPassive(refEntering);
+      break;
+#endif
+
     case ST_JOG:
       if (!healthOk()) break;
       if (now >= g_jogUntil) { stopMotion(F("jog done")); break; }
@@ -974,6 +1112,6 @@ void loop() {
   if (g_state != ST_STEPTEST && now - g_lastTeleMs >= TELEMETRY_MS) {
     g_lastTeleMs = now;
     if (g_state == ST_MOVING || g_state == ST_JOG ||
-        g_state == ST_REFPASS) printStatus();
+        g_state == ST_REFPASS || g_state == ST_MANUAL) printStatus();
   }
 }

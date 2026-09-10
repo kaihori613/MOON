@@ -53,8 +53,17 @@ const uint8_t PIN_BTN_RETRACT = A1;
 const uint8_t PIN_BTN_STOP    = A2;
 const uint8_t PIN_BUZZER      = 11;
 
-#define USE_BUTTONS 0           // reserved; no code reads these yet
+// MANUAL MODE. Hold-to-run: released is stopped, that instant. A serial
+// console has no key-up event, which is why the bring-up sketches jogged on a
+// timer and why a physical button is worth the three pins.
+//
+// A button press ALWAYS wins. It aborts whatever the host had commanded and
+// takes ownership of the axis, because the person holding the button is
+// standing next to the dish and the host is not.
+#define USE_BUTTONS 1
 #define USE_BUZZER  0
+
+const uint16_t BTN_DEBOUNCE_MS = 25;
 
 // ===========================================================================
 //  2. ENCODER  --  AS5600 on I2C
@@ -129,6 +138,10 @@ const float SLOW_ZONE_DEG  = 1.50f;   // approach below this at reduced ceiling
 const uint8_t SPEED_MAX   = 200;      // ceiling on |duty|
 const uint8_t SPEED_SLOW  = 110;      // ceiling inside SLOW_ZONE_DEG
 const uint8_t SPEED_FLOOR = 60;       // PLACEHOLDER breakaway; below = buzz
+
+// Manual jogs are deliberate, not fast. Tied to SPEED_SLOW rather than given
+// its own number so the two cannot drift apart during tuning.
+const uint8_t SPEED_BUTTON = SPEED_SLOW;
 
 // ===========================================================================
 //  4. TRAVEL LIMITS

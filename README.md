@@ -25,6 +25,7 @@ is the first sketch here that does; that part has not been on hardware yet.
 | `actuator_v2/` | **Rev B. Syntax-checked against stubs, never compiled for AVR, never run** |
 | `host/metric.py`, `host/satdump.py` | **Run.** Exercised against synthetic statsd and a stand-in HTTP server; neither has seen a real receiver |
 | `host/iq_snr.py` | **Estimators verified** to 0.06 dB against synthetic signals of known SNR. The capture function has never moved a sample |
+| `host/peak.py` | **Verified against a simulated dish** — finds the peak to 0.11° median at 0.4 dB noise. Never driven a real actuator |
 | Rest of `host/` | Written, never executed — no Python on the build machine yet |
 
 An earlier lineage, `actuator_system/`, was deleted in favour of v1. It was
@@ -94,6 +95,49 @@ a position is invalidated by the next recompute, a trim survives it.
 So if one sensor is the heart of the machine, it is the encoder. The signal
 path is what tells you, once, that the encoder's zero is aimed at the right
 patch of sky.
+
+## Two modes
+
+### Manual
+
+Owned by the panel. Hold extend or retract and the boom moves; release and it
+stops that instant, which is the whole reason those are buttons rather than a
+serial command — a console has no key-up event. The readout is in **degrees**,
+because the encoder is absolute and knows where the boom is without being
+told.
+
+**A button press always wins.** It aborts whatever the host had commanded and
+takes ownership, because the person holding the button is standing next to the
+dish and the host is not. Status reports `owner=local` or `owner=remote` so
+the host can tell it was pre-empted rather than wondering why its move stopped.
+
+Soft limits apply to manual driving too. Holding a button is not a reason to
+reach a hard stop.
+
+**Nothing moves at power-on.** The system reads the encoder, reports the angle,
+and waits. It does not home, and it does not drive to a park position — a dish
+that moves the instant it is plugged in, possibly with someone's hand near the
+linkage, is a hazard for no benefit when the position is already known.
+
+### Auto — the calibration run
+
+Armed when SatDump is recording and a metric is actually arriving. **Triggered
+by a person or by a degraded-signal condition, not by the recording starting.**
+
+The run sweeps the travel, stopping to measure at each step, fits the readings,
+and parks on the best angle. That is `host/peak.py`.
+
+Two things about it are deliberate. It **stops to measure** rather than sweeping
+continuously, because an SNR estimate needs seconds of averaging and a reading
+taken on the move belongs to where the dish *was* — a lag that biases the found
+peak in the direction of travel. And a failed run **returns the dish to where
+it started**, because the likeliest reason for failing is that something other
+than pointing is wrong, and in that case the old aim was the good one.
+
+It is a calibration, not a startup step. Run it once, store what it finds, and
+afterwards point from geometry plus that offset. Running a sweep every boot
+would mean deliberately mispointing a working dish for minutes to rediscover a
+number you already had.
 
 ## Sketches
 
@@ -543,11 +587,11 @@ backlash rather than tighter — see the tuning notes above.
 - **`REF_DRIFT_WARN_DEG` is a placeholder** and needs the switch's own
   repeatability measured first. Set below that and every ordinary crossing
   cries wolf; set well above it and real drift goes unreported.
-- **The step-track search does not exist yet.** `actuator_v2/` is the inner
-  loop only. `host/metric.py` now supplies the number it would climb — and is
-  the first file in `host/` that has actually been executed, against synthetic
-  statsd traffic — but nothing yet walks the target angle toward a peak. That
-  is the next piece of real work.
+- **The calibration sweep has never driven a real actuator.** `host/peak.py`
+  is verified against a simulated dish, but `move_to` has only ever been a
+  function that sets a variable. Wiring it to `link.py` and to a metric source
+  is the next piece of real work, and it is where the dwell and settle times
+  get their first honest test.
 - **The metric's own noise floor has never been measured on real signal**, and
   it sets both the dwell and the smallest usable step. `metric.py --noise`
   does it; it has not been pointed at a live receiver.
