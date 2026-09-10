@@ -289,6 +289,25 @@ the middle of the measured travel.
 
 Rev B. The inner loop of a cascade, and only the inner loop.
 
+**This is not a cascaded PID, and the distinction matters when tuning.** A
+cascaded PID is an outer PID whose output is the setpoint of an inner PID, both
+with gains, the way a servo drive stacks position over velocity over current.
+Here there is exactly ONE set of gains. The outer thing is a hill-climbing
+search: no setpoint, no error term, no gains, and no way to have any, because
+signal against angle is a peak rather than a ramp. Go looking for outer-loop
+gains and you will be looking for something that does not exist.
+
+A velocity inner loop is the one place a real cascade could go, and the encoder
+cannot feed it: at 0.0879° per count and 50 Hz the smallest measurable velocity
+is 4.4°/s, which the final approach is far below, so the feedback would be
+mostly zeros with occasional spikes exactly where the loop needs it most.
+Averaging over more ticks fixes the resolution and makes the inner loop slower
+than the outer one, which defeats the point. What such a loop would buy —
+linearising away stiction — is already what `KFF_FRICTION` does, with one
+number instead of two more gains. If it is ever wanted anyway, the sensor for
+it is the *reed*, timed period-between-pulses rather than counts-per-tick, so
+resolution comes from the timer instead of from quantisation.
+
 **It does not chase SNR, and that is deliberate.** Signal strength against
 pointing angle is a peak, not a ramp: the same reading occurs on both sides of
 it, so a controller fed SNR has no sign to act on and cannot know which way to
