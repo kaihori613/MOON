@@ -1,7 +1,12 @@
 # MOON — Actuator Control
 
-Arduino control code for an HTS TVRO linear actuator, closing the loop around
-the actuator's internal reed-switch position sensor.
+Arduino control code for an HTS TVRO linear actuator driving the yaw axis of
+a satellite dish, closed around an absolute encoder on the pivot.
+
+**Rev B** replaced the reed-counting design with an AS5600 on the yaw pivot.
+`actuator_v1/` still holds the reed version and is kept because it contains
+the only motor code that has ever turned the motor. See [WIRING.md](WIRING.md)
+for what changed and why.
 
 ## Status
 
@@ -15,7 +20,9 @@ is the first sketch here that does; that part has not been on hardware yet.
 |---|---|
 | `reed_switch_test/` | **Run on hardware, sensor is clean.** The timed run added since is unrun |
 | `l298n_test/`, `actuator_test/` | **Bring-up. The motor turned.** Superseded by `actuator_v1/` |
-| `actuator_v1/` | **Compiles clean, 63% flash / 17% RAM on a 328P. Never run.** |
+| `actuator_v1/` | **Compiles clean, 63% flash / 17% RAM on a 328P. Never run.** Rev A |
+| `as5600_test/` | **Rev B bring-up. Syntax-checked only, never run.** No motor code in it |
+| `actuator_v2/` | **Rev B. Syntax-checked against stubs, never compiled for AVR, never run** |
 | Host yaw pointing | Written, never executed — no Python on the build machine yet |
 
 An earlier lineage, `actuator_system/`, was deleted in favour of v1. It was
@@ -197,6 +204,109 @@ circuit, which is the configuration `reed_switch_test/` could never test.
 The status line and the `s` / `h` / `c` / `g` / `k` / bare-Enter commands match
 what `host/link.py` already speaks, so the host code can point at v1 unchanged.
 
+### `as5600_test/`
+
+Encoder bring-up, with no motor code in it at all, so it is safe to run with
+the driver unpowered. Three questions in order.
+
+**Is the magnet mounted right?** The AS5600 will happily report a
+plausible-looking angle from a magnet that is too far, off centre, or axially
+magnetised instead of diametrically. It reports all of that in `STATUS` and
+`AGC`, and this shows both live. A reading that looks fine on the bench and
+drifts once it is on the mount is almost always a magnet that was never in
+spec — and there is no way to tell from the angle alone, which is the entire
+reason this sketch exists.
+
+**Which way does it count?** `b` starts a sweep, you move the boom by hand,
+and each sample prints `counting UP` or `counting DOWN`. That answers
+`ENCODER_INVERT`. Getting it wrong makes the loop positive feedback, and the
+first move runs to a cam at whatever duty the PID asked for.
+
+**Does the travel straddle the wrap?** `x` ends the sweep and reports the
+span. If the range crosses the 0/4095 rollover it says so and tells you to
+rotate the magnet on its hub. It also suggests an `ENCODER_ZERO_DEFAULT` at
+the middle of the measured travel.
+
+### `actuator_v2/`
+
+Rev B. The inner loop of a cascade, and only the inner loop.
+
+**It does not chase SNR, and that is deliberate.** Signal strength against
+pointing angle is a peak, not a ramp: the same reading occurs on both sides of
+it, so a controller fed SNR has no sign to act on and cannot know which way to
+move. Peaking is a *search*. It belongs on the host, it runs on demand rather
+than continuously — GOES-18 is geostationary, so from a fixed site the look
+angle never changes — and it talks to this sketch by handing it target angles.
+What runs here is a servo on angle, where the error does have a sign.
+
+**Position is absolute and homing is gone.** With that, so are the EEPROM
+position and its check-on-next-home, the travel calibration, the midpoint
+origin, the `a`/`b` compass fit, and the direction-signed counting. Most of
+what was expensive in v1 existed to work around not knowing where the boom
+was.
+
+**The reed is kept as a witness.** It measures nothing, but it catches two
+failures neither sensor sees alone:
+
+- reed silent while the motor is commanded on → stall, cam cut, or blown fuse
+- reed pulsing while the boom does not move → **the linkage has broken**, and
+  the motor is driving nothing
+
+The second is the reason to keep it wired. An encoder on the pivot cannot tell
+a broken coupling from a stalled motor; a reed on the motor side cannot tell
+you where the boom is. Together they can do both.
+
+#### Tuning the PID
+
+A jack-driven dish is friction-dominated, which changes what the letters are
+worth. Gains are live — `p`, `i`, `d`, `f` — so none of this needs a reflash,
+and `t <deg>` runs a step and prints `ms,target,pos,duty` as CSV to plot.
+
+Work in this order:
+
+1. **`f` first, not `p`.** Set `kff` to the breakaway duty — the same number
+   v1 called `SPEED_FLOOR`. Below it the motor draws current, heats up and
+   does not turn, so every correction should start there and let the gains
+   trim from there. On this plant the feedforward does more work than the
+   integrator does.
+2. **Then `p`.** Raise `kp` until a step either oscillates or overshoots
+   badly, then halve it.
+3. **`i` only if a real offset persists** outside the deadband after the move
+   settles. Often it will not, and an integrator you do not need is an
+   integrator that hunts.
+4. **`d` last, and probably never.** Derivative on a 12-bit encoder reading a
+   slow mechanism is mostly quantisation noise amplified. Add it only if
+   overshoot survives step 2. It is taken on the *measurement*, not the error,
+   so a new target from the host does not put a spike through the output.
+5. **`w`** to save the zero and the gains.
+
+Two things are already handled and should not be re-invented during tuning.
+**Anti-windup**: integration stops whenever the output is saturated, which it
+will be for most of every long move. **The deadband**: inside it the output is
+zero and the integrator is dumped, because integral action across a mechanical
+dead zone is the textbook limit cycle and the dish will hunt all night.
+
+The deadband is the cheapest fix in the design, and it works because the
+pointing requirement is loose. Half-power beamwidth is roughly `70·λ/D`, which
+at 1694 MHz on a 1 m dish is about 12°, and pointing loss is about
+`12·(θ/θ₃dB)²` dB — so 0.1 dB costs ±1.1° of error. **Set the deadband wider
+than the measured backlash, not tighter.** A deadband several times the
+backlash still lands inside a pointing error nobody can measure, and it is
+what ends every move cleanly.
+
+#### Protocol delta
+
+`host/link.py` speaks v1's console. v2 keeps the same command letters and the
+same `key=value` status format, with three differences:
+
+- **`g <n>` takes degrees, not counts.** Status carries `unit=deg` so a host
+  can tell which sketch it is talking to.
+- **`h` (home) is a no-op** that says so, rather than an error.
+- **`c` (calibrate) is an alias for `z`**, set-zero-here.
+
+`link.py` has gained `move_to_deg()` alongside `move_to()`. Nothing in
+`host/` has been executed.
+
 ### `host/`
 
 Python, runs on the PC over USB. Homes the actuator, computes where GOES-18 is
@@ -214,9 +324,12 @@ the linkage calibration procedure.
 
 ## Two things worth knowing before reading the code
 
-**The reed switch counts, it does not tell direction.** Position is tracked as
-pulses signed by the direction last commanded, which is correct as long as
-nothing back-drives the actuator while the motor is off.
+**The reed switch counts, it does not tell direction.** That is why Rev B
+stopped using it for position. In `actuator_v1/` position is pulses signed by
+the direction last commanded, which is correct only as long as nothing
+back-drives the actuator while the motor is off — and wind on a dish does
+exactly that, with no symptom. In `actuator_v2/` the reed measures nothing;
+see the health section below.
 
 **The cam limit switches are not wired to the Arduino.** They cut motor
 current internally at both extremes. So "we reached the end" is inferred from
@@ -246,35 +359,37 @@ and `Config.h` cannot drift apart.
 
 ## Configuration
 
-Everything tunable lives in `actuator_v1/Config.h` — pins, speeds, tolerances,
+Everything tunable lives in `actuator_v2/Config.h` — pins, gains, tolerances,
 timeouts. That is the only file that should need editing for a hardware change.
-**Check `MOTOR_DRIVER` matches the module that is actually wired up** before the
-first run; it defaults to `DRV_L298N`.
+`actuator_v1/Config.h` is Rev A's and still carries `MOTOR_DRIVER`, which Rev B
+does not have: the G2's two-pin interface is the only one v2 speaks.
 
-Constants marked PLACEHOLDER are guesses awaiting bench numbers. `COAST_SETTLE_MS`
-is the load-bearing one: set too short, every move is judged before the carriage
-has finished moving and the landing reports lie to you.
+**Set `ENCODER_INVERT` and `ENCODER_ZERO_DEFAULT` from an `as5600_test/` run
+before enabling the loop.** An inverted encoder makes the PID positive
+feedback, and the first move runs to a cam at full commanded duty.
+
+Constants marked PLACEHOLDER are guesses awaiting bench numbers. In Rev B the
+load-bearing ones are `KFF_DEFAULT`, which should be the measured breakaway
+duty, and `DEADBAND_DEG`, which should be set *wider* than the measured
+backlash rather than tighter — see the tuning notes above.
 
 ## Known open issues
 
 - **Nothing in `host/` has ever been executed** — there is no Python on the
   build machine. `test_geometry.py` was written alongside the math but has not
   been run, so treat the pointing angles as unchecked until it passes.
-- **End-stop repeatability has never been measured, and nothing here measures
-  it any more.** The cams are now known to cut, which is what makes homing
-  viable at all — but a cam that cuts reliably and a cam that cuts in the *same
-  place* every time are different claims, and only the first has been checked.
-  Homing calls the retract stop zero, so if that stop lands a few counts
-  different each time, the whole coordinate system moves with it and every
-  absolute target inherits the error. `cam_switch_test/` measured exactly this
-  and was deleted; recover it from git history, or add a repeat-home command to
-  `actuator_v1/` (it has no such command yet), before trusting an absolute
-  position.
-- Yaw resolution is unknown until `mm_per_count` is measured. One reed count is
-  the floor on pointing accuracy; if it turns out coarser than the link needs,
-  the fix is a longer moment arm on the linkage, not software. `reed_switch_test/`
-  measures it now — timed run, count the pulses, measure the rod, `m <mm>` —
-  but that has not been done yet.
+- **End-stop repeatability no longer matters, and that is the main thing Rev B
+  bought.** Rev A called the retract stop zero, so a stop that landed a few
+  counts different each time moved the whole coordinate system with it. An
+  absolute encoder has no such dependency: zero is a stored raw count, not a
+  place the mechanism has to find. The issue is closed by the design rather
+  than by a measurement.
+- **Yaw resolution is now set by the encoder, not the mechanism**: 0.0879° per
+  count, against a pointing requirement of roughly ±1.1° on a 12° beam. That is
+  about 12× more resolution than the beam can use, so do not gear the encoder
+  up — a belt would add backlash inside the feedback path in exchange for
+  resolution nothing can see. `mm_per_count` is still worth measuring, but only
+  to calibrate `LINKAGE_MIN_DEG` for the broken-linkage check.
 - Reed noise rejection is debounce-only, and the noise floor has only been
   measured with no bridge in the circuit — which is the one configuration where
   a clean result proves nothing. `actuator_v1/` carries the test over as `n` so
@@ -282,11 +397,13 @@ has finished moving and the landing reports lie to you.
   pickup appears, the fix is 4.7k pull-up to 5V, 220R in series with the reed,
   220nF to ground at the pin, and a shared ground that does not carry motor
   return current.
-- **Coast has never been measured**, so `COAST_SETTLE_MS` is a guess. Set too
-  short, every move is judged before the carriage has finished moving and the
-  landing report lies. It is the first constant to nail down on the bench, and
-  `reed_switch_test/` now reports it on every run — in milliseconds for this
-  constant, and in counts for the deadband. Still needs doing.
+- **Breakaway duty has never been measured**, and in Rev B it is `KFF_DEFAULT`
+  — the first term to set during tuning, and the one the others are trimming
+  on top of. `actuator_test/` measures it.
+- **Backlash has never been measured**, and it sets `DEADBAND_DEG`. With the
+  encoder on the pivot it is now directly observable: drive to a target, then
+  drive back to it from the other direction, and the difference in landed
+  angle is the backlash.
 - No off-target tests for the state machine, and no simulator any more, so
   there is currently no way to exercise it without hardware.
 - **The front panel and the IMU are reserved, not implemented.** `Config.h`
@@ -297,8 +414,14 @@ has finished moving and the landing reports lie to you.
   MPU6050 **cannot measure yaw** — it is a six-axis part with no magnetometer,
   so it cannot replace the compass sighting behind `a` and `b`. What it can
   usefully do instead is in [WIRING.md](WIRING.md).
-- **The degrees readout is uncalibrated and shows `?`.** `a`/`b` fix that in a
-  couple of minutes with a compass, but it needs the actuator drivable first.
-- Flash sits at 63% with the LCD compiled out, 81% with it in. `Wire` and
-  `snprintf`'s formatting machinery are most of that difference. Room to work
-  either way, but not a lot once the display goes in.
+- **The step-track search does not exist yet.** `actuator_v2/` is the inner
+  loop only; nothing on the host reads a metric out of `goesrecv` or walks the
+  target angle toward a peak. That is the next piece of real work.
+- **The AS5600 magnet has never been mounted**, so the whole Rev B measurement
+  chain is unverified end to end.
+- **Flash on Rev B is unmeasured** — there is no AVR toolchain on the build
+  machine, so `actuator_v2/` has only been syntax-checked against stubs. Rev A
+  sat at 63% without the LCD. v2 adds `Wire` and float PID but drops homing,
+  the EEPROM position machinery and the angle fit, so it may well come out
+  smaller. It prints with integer arithmetic and never `%f`, which is where
+  the 1.5 kB of AVR float-printf support would otherwise have gone.

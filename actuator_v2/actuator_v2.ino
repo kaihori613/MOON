@@ -1,0 +1,745 @@
+// ===========================================================================
+//  MOON actuator_v2 -- Rev B
+// ===========================================================================
+//  Yaw positioning closed around an absolute encoder on the pivot.
+//
+//  The one thing to understand before reading further: THIS SKETCH DOES NOT
+//  CHASE SNR. Signal strength against pointing angle is a peak, not a ramp --
+//  the same error reading occurs on both sides of it, so a PID fed SNR has no
+//  sign to act on and cannot know which way to move. Peaking is a SEARCH, it
+//  lives on the host, and it talks to this sketch by handing it target
+//  angles. What runs here is the inner loop: a servo on angle, where the
+//  error does have a sign.
+//
+//  Nothing here has been on hardware.
+
+#include "Config.h"
+#include <Wire.h>
+#if USE_EEPROM
+  #include <EEPROM.h>
+#endif
+
+// ---------------------------------------------------------------------------
+//  Reed -- witness only
+// ---------------------------------------------------------------------------
+//  Deliberately not integrated into anything. It counts, and the count is
+//  only ever compared against itself over a window to answer "is the motor
+//  turning". Position comes from the encoder.
+
+volatile unsigned long g_reedPulses  = 0;
+volatile unsigned long g_reedLastUs  = 0;
+volatile unsigned long g_reedLastMs  = 0;
+
+void onReedEdge() {
+  const unsigned long now = micros();
+  if (now - g_reedLastUs < REED_DEBOUNCE_US) return;   // bounce, or pickup
+  g_reedLastUs = now;
+  g_reedLastMs = millis();
+  g_reedPulses++;
+}
+
+unsigned long reedPulses() {
+  noInterrupts();
+  const unsigned long n = g_reedPulses;
+  interrupts();
+  return n;
+}
+
+unsigned long reedLastMs() {
+  noInterrupts();
+  const unsigned long n = g_reedLastMs;
+  interrupts();
+  return n;
+}
+
+// ---------------------------------------------------------------------------
+//  AS5600
+// ---------------------------------------------------------------------------
+
+static uint8_t  g_encFails   = 0;
+static uint16_t g_encRaw     = 0;
+static bool     g_encOk      = false;
+static int16_t  g_zeroCount  = ENCODER_ZERO_DEFAULT;
+
+// Returns false and leaves *out untouched on any bus error. Callers must
+// treat that as fatal mid-move: a stale angle in the loop is worse than a
+// stopped motor.
+bool as5600Read(uint8_t reg, uint8_t n, uint8_t *buf) {
+  Wire.beginTransmission(AS5600_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((uint8_t)AS5600_ADDR, n) != n) return false;
+  for (uint8_t i = 0; i < n; i++) buf[i] = Wire.read();
+  return true;
+}
+
+bool as5600Angle(uint16_t *out) {
+  uint8_t b[2];
+  if (!as5600Read(0x0C, 2, b)) return false;        // RAW ANGLE hi/lo
+  *out = (((uint16_t)b[0] << 8) | b[1]) & 0x0FFF;
+  return true;
+}
+
+// STATUS bit 5 = MD (magnet detected), 4 = ML (too weak), 3 = MH (too strong)
+bool as5600Status(uint8_t *out) {
+  return as5600Read(0x0B, 1, out);
+}
+
+bool as5600Agc(uint8_t *out) {
+  return as5600Read(0x1A, 1, out);
+}
+
+// Signed shortest way round, so a working range that happens to straddle the
+// 0/4095 wrap still produces a sane difference.
+int16_t angleDiff(uint16_t a, uint16_t b) {
+  int16_t d = (int16_t)a - (int16_t)b;
+  const int16_t half = (int16_t)(AS5600_COUNTS / 2);
+  if (d >  half) d -= (int16_t)AS5600_COUNTS;
+  if (d < -half) d += (int16_t)AS5600_COUNTS;
+  return d;
+}
+
+float countsToDeg(int16_t counts) {
+#if ENCODER_INVERT
+  return -(float)counts * DEG_PER_COUNT;
+#else
+  return  (float)counts * DEG_PER_COUNT;
+#endif
+}
+
+// Reads the encoder into the cached state. Returns false once the failure
+// run reaches ENCODER_MAX_FAILS.
+bool encoderPoll() {
+  uint16_t raw;
+  if (as5600Angle(&raw)) {
+    g_encRaw = raw;
+    g_encFails = 0;
+    g_encOk = true;
+    return true;
+  }
+  if (g_encFails < 255) g_encFails++;
+  if (g_encFails >= ENCODER_MAX_FAILS) g_encOk = false;
+  return g_encOk;
+}
+
+float positionDeg() {
+  return countsToDeg(angleDiff(g_encRaw, (uint16_t)g_zeroCount));
+}
+
+// ---------------------------------------------------------------------------
+//  Limits
+// ---------------------------------------------------------------------------
+//  NC contacts to GND: LOW is the healthy, closed, not-at-a-limit state.
+//  A pulled-up HIGH means either the cam is tripped or the wire has broken,
+//  and both should stop travel in that direction.
+
+bool limitPos() { return digitalRead(PIN_LIM_POS) == HIGH; }
+bool limitNeg() { return digitalRead(PIN_LIM_NEG) == HIGH; }
+
+// ---------------------------------------------------------------------------
+//  Motor
+// ---------------------------------------------------------------------------
+
+static int      g_duty       = 0;    // signed, what we last commanded
+static int8_t   g_lastSign   = 0;
+static unsigned long g_coastUntil = 0;
+
+void motorOff() {
+  analogWrite(PIN_PWM, 0);
+  digitalWrite(PIN_PWM, LOW);        // detach the PWM, whichever timer drove it
+  digitalWrite(PIN_SLP, LOW);        // and put the bridge to sleep
+  g_duty = 0;
+  g_lastSign = 0;
+}
+
+// Signed duty in, with every interlock applied on the way through. This is
+// the ONLY place the motor is energised.
+void driveSigned(int duty) {
+  duty = constrain(duty, -(int)SPEED_MAX, (int)SPEED_MAX);
+
+  // Hardware already blocks travel into a tripped cam; refusing here too
+  // means the firmware and the wiring agree rather than fighting.
+  if (limitPos() && duty > 0) duty = 0;
+  if (limitNeg() && duty < 0) duty = 0;
+
+  const int8_t sign = (duty > 0) ? 1 : (duty < 0 ? -1 : 0);
+
+  // Never cross zero under power.
+  if (sign != 0 && g_lastSign != 0 && sign != g_lastSign) {
+    motorOff();
+    g_coastUntil = millis() + REVERSE_DEAD_MS;
+    return;
+  }
+  if (millis() < g_coastUntil) { motorOff(); return; }
+
+  if (sign == 0) { motorOff(); return; }
+
+  digitalWrite(PIN_SLP, HIGH);
+  digitalWrite(PIN_DIR, sign > 0 ? HIGH : LOW);
+  analogWrite(PIN_PWM, (uint8_t)abs(duty));
+  g_duty = duty;
+  g_lastSign = sign;
+}
+
+// ---------------------------------------------------------------------------
+//  PID
+// ---------------------------------------------------------------------------
+
+static float g_kp = KP_DEFAULT;
+static float g_ki = KI_DEFAULT;
+static float g_kd = KD_DEFAULT;
+static float g_kff = KFF_DEFAULT;
+
+struct PidState {
+  float integral;
+  float prevMeas;
+  bool  primed;
+  bool  holdIntegral;   // set when the output saturated last tick
+};
+static PidState g_pid = {0.0f, 0.0f, false, false};
+
+void pidReset() {
+  g_pid.integral = 0.0f;
+  g_pid.primed = false;
+  g_pid.holdIntegral = false;
+}
+
+// Returns unclamped signed duty. Clamping and the interlocks belong to
+// driveSigned(); keeping them out of here means the saturation test below
+// sees the real, unclamped demand.
+float pidStep(float target, float meas, float dt) {
+  const float e = target - meas;
+
+  if (fabs(e) <= DEADBAND_DEG) {
+    // Inside the deadband there is nothing worth doing. Dumping the
+    // integrator here is what stops a backlash-y plant hunting: integral
+    // action across a mechanical dead zone is the textbook limit cycle, and
+    // the deadband is deliberately set wider than the backlash so that this
+    // branch, not the integrator, is what ends every move.
+    g_pid.integral = 0.0f;
+    g_pid.prevMeas = meas;
+    g_pid.primed = true;
+    return 0.0f;
+  }
+
+  float u = g_kp * e;
+
+  // Friction feedforward. Below breakaway the motor draws current, heats up
+  // and does not turn, so every correction starts at the duty that actually
+  // moves the thing and the gains only trim from there. On a plant this
+  // stiction-dominated it does more work than the integrator does.
+  u += (e > 0.0f) ? g_kff : -g_kff;
+
+  // Conditional integration: stop winding whenever the last output was
+  // already saturated, or the integrator fills up during every long move and
+  // then drives a huge overshoot at the end of it.
+  if (!g_pid.holdIntegral) {
+    g_pid.integral += e * dt;
+    if (g_pid.integral >  I_MAX) g_pid.integral =  I_MAX;
+    if (g_pid.integral < -I_MAX) g_pid.integral = -I_MAX;
+  }
+  u += g_ki * g_pid.integral;
+
+  // Derivative on the MEASUREMENT, not the error: differentiating the error
+  // puts a spike through the output every time the host hands us a new
+  // target, which has nothing to do with what the plant is doing.
+  if (g_kd != 0.0f && g_pid.primed && dt > 0.0f) {
+    u -= g_kd * (meas - g_pid.prevMeas) / dt;
+  }
+  g_pid.prevMeas = meas;
+  g_pid.primed = true;
+
+  return u;
+}
+
+// ---------------------------------------------------------------------------
+//  State
+// ---------------------------------------------------------------------------
+
+enum State : uint8_t { ST_IDLE, ST_MOVING, ST_JOG, ST_STEPTEST, ST_FAULT };
+static State g_state = ST_IDLE;
+
+enum Fault : uint8_t {
+  F_NONE = 0, F_STALL, F_LINKAGE, F_ENCODER, F_LIMIT, F_TIMEOUT, F_CURRENT, F_RANGE
+};
+static Fault g_fault = F_NONE;
+
+static float         g_target      = 0.0f;
+static unsigned long g_moveStarted = 0;
+static unsigned long g_jogUntil    = 0;
+static int           g_jogDuty     = 0;
+
+// health window
+static unsigned long g_winPulses   = 0;
+static float         g_winStartDeg = 0.0f;
+static unsigned long g_lastLoopMs  = 0;
+static unsigned long g_lastTeleMs  = 0;
+
+// step test
+static unsigned long g_stepUntil = 0;
+static unsigned long g_stepNext  = 0;
+static unsigned long g_stepT0    = 0;
+
+const __FlashStringHelper *faultName(Fault f) {
+  switch (f) {
+    case F_NONE:    return F("none");
+    case F_STALL:   return F("stall");
+    case F_LINKAGE: return F("linkage");
+    case F_ENCODER: return F("encoder");
+    case F_LIMIT:   return F("limit");
+    case F_TIMEOUT: return F("timeout");
+    case F_CURRENT: return F("current");
+    case F_RANGE:   return F("range");
+  }
+  return F("?");
+}
+
+const __FlashStringHelper *stateName(State s) {
+  switch (s) {
+    case ST_IDLE:     return F("IDLE");
+    case ST_MOVING:   return F("MOVING");
+    case ST_JOG:      return F("JOG");
+    case ST_STEPTEST: return F("STEP");
+    case ST_FAULT:    return F("FAULT");
+  }
+  return F("?");
+}
+
+void raiseFault(Fault f) {
+  motorOff();
+  pidReset();
+  g_fault = f;
+  g_state = ST_FAULT;
+  Serial.print(F("FAULT "));
+  Serial.println(faultName(f));
+}
+
+void stopMotion(const __FlashStringHelper *why) {
+  motorOff();
+  pidReset();
+  if (g_state != ST_FAULT) g_state = ST_IDLE;
+  if (why) { Serial.print(F("stop: ")); Serial.println(why); }
+}
+
+// ---------------------------------------------------------------------------
+//  Printing -- integer only
+// ---------------------------------------------------------------------------
+//  No %f anywhere. AVR's default printf has no float support and pulling in
+//  the version that does costs about 1.5 kB of flash for the privilege of
+//  printing three decimal places.
+
+void printDeg(float v) {
+  long milli = (long)(v * 1000.0f + (v >= 0 ? 0.5f : -0.5f));
+  if (milli < 0) { Serial.print('-'); milli = -milli; }
+  Serial.print(milli / 1000);
+  Serial.print('.');
+  long frac = milli % 1000;
+  if (frac < 100) Serial.print('0');
+  if (frac < 10)  Serial.print('0');
+  Serial.print(frac);
+}
+
+void printStatus() {
+  Serial.print(F("state="));   Serial.print(stateName(g_state));
+  Serial.print(F(" pos="));    printDeg(positionDeg());
+  Serial.print(F(" target=")); printDeg(g_target);
+  Serial.print(F(" duty="));   Serial.print(g_duty);
+  Serial.print(F(" unit=deg"));
+  Serial.print(F(" enc="));    Serial.print(g_encRaw);
+  Serial.print(F(" zero="));   Serial.print(g_zeroCount);
+  Serial.print(F(" encok="));  Serial.print(g_encOk ? 1 : 0);
+  Serial.print(F(" lim="));
+  Serial.print(limitNeg() ? '-' : '.');
+  Serial.print(limitPos() ? '+' : '.');
+  Serial.print(F(" reed="));   Serial.print(reedPulses());
+  Serial.print(F(" kp="));     printDeg(g_kp);
+  Serial.print(F(" ki="));     printDeg(g_ki);
+  Serial.print(F(" kd="));     printDeg(g_kd);
+  Serial.print(F(" kff="));    printDeg(g_kff);
+  Serial.print(F(" fault="));  Serial.print(faultName(g_fault));
+  Serial.println();
+}
+
+// ---------------------------------------------------------------------------
+//  EEPROM
+// ---------------------------------------------------------------------------
+
+#if USE_EEPROM
+struct Saved {
+  uint32_t magic;
+  int16_t  zero;
+  float    kp, ki, kd, kff;
+};
+
+void saveSettings() {
+  Saved s;
+  s.magic = EEPROM_MAGIC;
+  s.zero = g_zeroCount;
+  s.kp = g_kp; s.ki = g_ki; s.kd = g_kd; s.kff = g_kff;
+  EEPROM.put(EEPROM_BASE_ADDR, s);
+  Serial.println(F("saved"));
+}
+
+void loadSettings() {
+  Saved s;
+  EEPROM.get(EEPROM_BASE_ADDR, s);
+  if (s.magic != EEPROM_MAGIC) { Serial.println(F("eeprom: blank, using defaults")); return; }
+  g_zeroCount = s.zero;
+  g_kp = s.kp; g_ki = s.ki; g_kd = s.kd; g_kff = s.kff;
+  Serial.println(F("eeprom: loaded"));
+}
+#else
+void saveSettings() {}
+void loadSettings() {}
+#endif
+
+// ---------------------------------------------------------------------------
+//  Motion entry points
+// ---------------------------------------------------------------------------
+
+void beginMove(float targetDeg) {
+  if (g_state == ST_FAULT) { Serial.println(F("faulted -- 'k' first")); return; }
+  if (!g_encOk)            { Serial.println(F("no encoder")); return; }
+
+  if (fabs(targetDeg) > SOFT_LIMIT_DEG) {
+    Serial.print(F("refused: outside +/-"));
+    printDeg(SOFT_LIMIT_DEG);
+    Serial.println(F(" deg soft limit"));
+    g_fault = F_RANGE;
+    return;
+  }
+
+  g_target = targetDeg;
+  g_moveStarted = millis();
+  g_winPulses = reedPulses();
+  g_winStartDeg = positionDeg();
+  pidReset();
+  g_state = ST_MOVING;
+
+  Serial.print(F("move to ")); printDeg(g_target);
+  Serial.print(F(" from "));   printDeg(positionDeg());
+  Serial.println();
+}
+
+void beginJog(int8_t dir, uint16_t ms) {
+  if (g_state == ST_FAULT) { Serial.println(F("faulted -- 'k' first")); return; }
+  ms = constrain(ms, 1, JOG_MS_MAX);
+  g_jogDuty = dir > 0 ? (int)SPEED_SLOW : -(int)SPEED_SLOW;
+  g_jogUntil = millis() + ms;
+  g_moveStarted = millis();
+  g_winPulses = reedPulses();
+  g_winStartDeg = positionDeg();
+  g_state = ST_JOG;
+}
+
+// ---------------------------------------------------------------------------
+//  Health checks, run on every tick while the motor is commanded on
+// ---------------------------------------------------------------------------
+
+bool healthOk() {
+  const unsigned long now = millis();
+
+  if (!g_encOk) { raiseFault(F_ENCODER); return false; }
+
+  if (now - g_moveStarted > MAX_RUN_MS) { raiseFault(F_TIMEOUT); return false; }
+
+#if USE_CURRENT_LIMIT
+  if (analogRead(PIN_CS) > CURRENT_TRIP_ADC) { raiseFault(F_CURRENT); return false; }
+#endif
+
+  if (g_duty == 0) return true;         // coasting between directions
+
+  // Reed silent while the motor is on. Past the breakaway grace this is a
+  // stall, a cam that has cut its own current, or a dead fuse -- and from out
+  // here those look identical, which is why all three stop the motor.
+  const unsigned long sinceStart = now - g_moveStarted;
+  const unsigned long sincePulse = now - reedLastMs();
+  if (sinceStart > START_GRACE_MS && sincePulse > STALL_TIMEOUT_MS) {
+    raiseFault(F_STALL);
+    return false;
+  }
+
+  // Reed pulsing but the boom not moving: the motor is turning something
+  // that is no longer attached to the dish. Neither sensor can see this
+  // alone, and it is the whole reason the reed stayed wired.
+  const unsigned long pulses = reedPulses() - g_winPulses;
+  if (pulses >= LINKAGE_PULSES) {
+    if (fabs(positionDeg() - g_winStartDeg) < LINKAGE_MIN_DEG) {
+      raiseFault(F_LINKAGE);
+      return false;
+    }
+    g_winPulses = reedPulses();
+    g_winStartDeg = positionDeg();
+  }
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+//  Console
+// ---------------------------------------------------------------------------
+
+static char g_line[40];
+static uint8_t g_len = 0;
+
+void printHelp() {
+  Serial.println(F("  <enter>    STOP"));
+  Serial.println(F("  s          status"));
+  Serial.println(F("  g <deg>    go to absolute angle"));
+  Serial.println(F("  +<deg>     relative move   -<deg>"));
+  Serial.println(F("  e <ms>     open-loop jog   r <ms>"));
+  Serial.println(F("  m          monitor raw encoder (check mounting/invert)"));
+  Serial.println(F("  z          set zero here"));
+  Serial.println(F("  p/i/d/f <v> set kp/ki/kd/kff live"));
+  Serial.println(F("  t <deg>    step test, CSV out"));
+  Serial.println(F("  n          reed noise floor"));
+  Serial.println(F("  w          save zero + gains"));
+  Serial.println(F("  k          clear fault"));
+}
+
+void monitorEncoder() {
+  uint8_t st = 0, agc = 0;
+  bool okS = as5600Status(&st);
+  bool okA = as5600Agc(&agc);
+  Serial.print(F("raw="));  Serial.print(g_encRaw);
+  Serial.print(F(" pos=")); printDeg(positionDeg());
+  if (okS) {
+    Serial.print(F(" magnet="));
+    if      (st & 0x10) Serial.print(F("WEAK"));
+    else if (st & 0x08) Serial.print(F("STRONG"));
+    else if (st & 0x20) Serial.print(F("ok"));
+    else                Serial.print(F("NONE"));
+  }
+  if (okA) { Serial.print(F(" agc=")); Serial.print(agc); }
+  Serial.println();
+}
+
+void reedNoiseFloor() {
+  Serial.println(F("reed noise floor, 5 s, bridge powered, motor OFF"));
+  motorOff();
+  const unsigned long start = reedPulses();
+  const unsigned long t0 = millis();
+  while (millis() - t0 < 5000) { /* the ISR is the measurement */ }
+  Serial.print(F("edges="));
+  Serial.println(reedPulses() - start);
+  Serial.println(F("anything but 0 is pickup, not travel"));
+}
+
+void handleLine(char *s) {
+  while (*s == ' ') s++;
+
+  if (*s == '\0') { stopMotion(F("commanded")); return; }
+
+  const char c = *s;
+  char *arg = s + 1;
+  while (*arg == ' ') arg++;
+  const bool hasArg = (*arg != '\0');
+  const float fv = hasArg ? atof(arg) : 0.0f;
+
+  switch (c) {
+    case 's': printStatus(); break;
+    case '?': printHelp();   break;
+
+    case 'g': if (hasArg) beginMove(fv); else Serial.println(F("g <deg>")); break;
+    case '+': beginMove(positionDeg() + (hasArg ? atof(s + 1) : 0.1f)); break;
+    case '-': beginMove(positionDeg() - (hasArg ? atof(s + 1) : 0.1f)); break;
+
+    case 'e': beginJog(+1, hasArg ? (uint16_t)fv : JOG_MS_DEFAULT); break;
+    case 'r': beginJog(-1, hasArg ? (uint16_t)fv : JOG_MS_DEFAULT); break;
+
+    case 'm': monitorEncoder(); break;
+    case 'n': reedNoiseFloor(); break;
+
+    case 'z':
+    case 'c':                                  // 'c' kept so an old host does
+      g_zeroCount = (int16_t)g_encRaw;         // not fall over on it
+      Serial.print(F("zero set at raw "));
+      Serial.println(g_zeroCount);
+      break;
+
+    case 'h':
+      Serial.println(F("homing is gone -- the encoder is absolute"));
+      break;
+
+    case 'p': if (hasArg) { g_kp  = fv; Serial.println(F("kp set"));  } break;
+    case 'i': if (hasArg) { g_ki  = fv; pidReset(); Serial.println(F("ki set")); } break;
+    case 'd': if (hasArg) { g_kd  = fv; Serial.println(F("kd set")); } break;
+    case 'f': if (hasArg) { g_kff = fv; Serial.println(F("kff set")); } break;
+
+    case 'w': saveSettings(); break;
+
+    case 'k':
+      g_fault = F_NONE;
+      g_state = ST_IDLE;
+      g_encFails = 0;
+      pidReset();
+      Serial.println(F("fault cleared"));
+      break;
+
+    case 't':
+      if (!hasArg) { Serial.println(F("t <deg>")); break; }
+      beginMove(fv);
+      if (g_state == ST_MOVING) {
+        g_state = ST_STEPTEST;
+        g_stepT0 = millis();
+        g_stepUntil = g_stepT0 + STEP_TEST_MS;
+        g_stepNext = g_stepT0;
+        Serial.println(F("ms,target,pos,duty"));
+      }
+      break;
+
+    default:
+      Serial.println(F("? for help"));
+  }
+}
+
+void pollSerial() {
+  while (Serial.available()) {
+    const char ch = (char)Serial.read();
+    if (ch == '\r') continue;
+    if (ch == '\n') {
+      g_line[g_len] = '\0';
+      handleLine(g_line);
+      g_len = 0;
+      return;
+    }
+    if (g_len < sizeof(g_line) - 1) g_line[g_len++] = ch;
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  setup / loop
+// ---------------------------------------------------------------------------
+
+void setup() {
+  // Claim the bridge low BEFORE anything else. An unconfigured output is a
+  // floating input, and a driver gets to decide for itself what that means.
+  pinMode(PIN_PWM, OUTPUT);
+  pinMode(PIN_DIR, OUTPUT);
+  pinMode(PIN_SLP, OUTPUT);
+  digitalWrite(PIN_PWM, LOW);
+  digitalWrite(PIN_DIR, LOW);
+  digitalWrite(PIN_SLP, LOW);
+
+  pinMode(PIN_REED,    INPUT_PULLUP);
+  pinMode(PIN_LIM_POS, INPUT_PULLUP);
+  pinMode(PIN_LIM_NEG, INPUT_PULLUP);
+#if USE_BUTTONS
+  pinMode(PIN_BTN_EXTEND,  INPUT_PULLUP);
+  pinMode(PIN_BTN_RETRACT, INPUT_PULLUP);
+  pinMode(PIN_BTN_STOP,    INPUT_PULLUP);
+#endif
+#if USE_BUZZER
+  pinMode(PIN_BUZZER, OUTPUT);
+#endif
+
+  attachInterrupt(digitalPinToInterrupt(PIN_REED), onReedEdge, FALLING);
+
+  Serial.begin(115200);
+  Serial.println(F("MOON actuator_v2 -- Rev B"));
+
+  Wire.begin();
+  Wire.setClock(400000);
+
+  loadSettings();
+
+  uint8_t st;
+  if (!as5600Status(&st)) {
+    Serial.println(F("AS5600 did not answer at 0x36"));
+  } else if (!(st & 0x20)) {
+    Serial.println(F("AS5600 sees no magnet"));
+  } else if (st & 0x10) {
+    Serial.println(F("AS5600 magnet WEAK -- too far"));
+  } else if (st & 0x08) {
+    Serial.println(F("AS5600 magnet STRONG -- too close"));
+  }
+
+  encoderPoll();
+  if (!g_encOk) {
+    raiseFault(F_ENCODER);
+  } else {
+    Serial.print(F("boot position "));
+    printDeg(positionDeg());
+    Serial.println(F(" deg -- no homing needed"));
+  }
+
+  Serial.println(F("? for help"));
+  g_lastLoopMs = millis();
+}
+
+void loop() {
+  pollSerial();
+
+  const unsigned long now = millis();
+  if (now - g_lastLoopMs < LOOP_MS) return;
+  const float dt = (float)(now - g_lastLoopMs) / 1000.0f;
+  g_lastLoopMs = now;
+
+  encoderPoll();
+
+  switch (g_state) {
+
+    case ST_MOVING:
+    case ST_STEPTEST: {
+      if (!healthOk()) break;
+
+      const float pos = positionDeg();
+      const float u = pidStep(g_target, pos, dt);
+
+      // Ceiling drops on the approach so the last of the move is slow enough
+      // that coast does not throw the landing past the deadband.
+      const int ceiling = (fabs(g_target - pos) < SLOW_ZONE_DEG)
+                            ? (int)SPEED_SLOW : (int)SPEED_MAX;
+
+      int out = (int)u;
+      if (out >  ceiling) out =  ceiling;
+      if (out < -ceiling) out = -ceiling;
+      g_pid.holdIntegral = ((int)u != out);      // saturated -> stop winding
+
+      // Anything under breakaway heats the motor and moves nothing.
+      if (out != 0 && abs(out) < (int)SPEED_FLOOR) {
+        out = (out > 0) ? (int)SPEED_FLOOR : -(int)SPEED_FLOOR;
+      }
+
+      driveSigned(out);
+
+      if (g_state == ST_STEPTEST) {
+        if (now >= g_stepNext) {
+          g_stepNext = now + STEP_SAMPLE_MS;
+          Serial.print(now - g_stepT0); Serial.print(',');
+          printDeg(g_target);           Serial.print(',');
+          printDeg(pos);                Serial.print(',');
+          Serial.println(g_duty);
+        }
+        if (now >= g_stepUntil) { stopMotion(F("step test done")); }
+        break;
+      }
+
+      if (out == 0 && fabs(g_target - pos) <= DEADBAND_DEG) {
+        motorOff();
+        g_state = ST_IDLE;
+        Serial.print(F("landed at ")); printDeg(pos);
+        Serial.print(F(" err "));      printDeg(g_target - pos);
+        Serial.println();
+      }
+      break;
+    }
+
+    case ST_JOG:
+      if (!healthOk()) break;
+      if (now >= g_jogUntil) { stopMotion(F("jog done")); break; }
+      driveSigned(g_jogDuty);
+      break;
+
+    case ST_IDLE:
+    case ST_FAULT:
+    default:
+      motorOff();
+      break;
+  }
+
+  if (g_state != ST_STEPTEST && now - g_lastTeleMs >= TELEMETRY_MS) {
+    g_lastTeleMs = now;
+    if (g_state == ST_MOVING || g_state == ST_JOG) printStatus();
+  }
+}

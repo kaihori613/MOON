@@ -139,19 +139,38 @@ class ActuatorLink:
                 continue
 
             fields = dict(_KV.findall(line))
+
+            # Rev B positions in degrees and prints them with a decimal point,
+            # so these must parse as float. Reading them as int would not
+            # raise -- it would quietly yield 0 for every position, which is a
+            # far worse failure than a crash on a control loop.
+            unit = fields.get("unit", "counts")
+
+            # Rev B names the fault in a field; Rev A only ever printed the
+            # word FAULT into the line. Prefer the field where it exists.
+            if "fault" in fields:
+                fault = None if fields["fault"] == "none" else fields["fault"]
+            else:
+                fault = _fault_of(line)
+
             return {
                 "state": fields.get("state", "?"),
                 # pos and target are always printed, so a None here means a
                 # mangled line; 0 keeps the display formatting alive rather
                 # than crashing the tuning loop over one corrupt read.
-                "pos": _as_int(fields.get("pos")) or 0,
-                "target": _as_int(fields.get("target")) or 0,
+                "pos": _as_float(fields.get("pos")) or 0.0,
+                "target": _as_float(fields.get("target")) or 0.0,
+                "unit": unit,
                 "travel": _as_int(fields.get("travel")),   # None when uncalibrated
                 "homed": fields.get("homed", "NO") == "yes",
+                # Rev A calls it pwm, Rev B calls it duty and signs it.
                 "pwm": _as_int(fields.get("pwm")) or 0,
+                "duty": _as_int(fields.get("duty")) or 0,
+                "encoder_ok": fields.get("encok") == "1",
+                "limits": fields.get("lim", ".."),
                 "hz": _as_float(fields.get("hz")) or 0.0,
                 "at_hard_stop": "[at hard stop]" in line,
-                "fault": _fault_of(line),
+                "fault": fault,
                 "raw": line,
             }
 
@@ -173,7 +192,37 @@ class ActuatorLink:
         self._write("c")
 
     def move_to(self, counts: int):
+        """Rev A: 'g' takes reed counts. See move_to_deg for Rev B."""
         self._write(f"g {int(round(counts))}")
+
+    def move_to_deg(self, degrees: float):
+        """
+        Rev B: 'g' takes an absolute angle in degrees.
+
+        The command letter did not change, only its unit, so the two sketches
+        are indistinguishable from the wire until you read a status line --
+        which is why actuator_v2 reports unit=deg and this module exposes
+        both. Check unit_is_degrees() rather than guessing from the banner.
+        """
+        self._write(f"g {degrees:.3f}")
+
+    def unit_is_degrees(self) -> bool:
+        """True when the attached sketch positions in degrees (Rev B)."""
+        return self.status().get("unit") == "deg"
+
+    def set_zero(self):
+        """Rev B: call the current position zero. 'c' is kept as an alias."""
+        self._write("z")
+
+    def set_gain(self, which: str, value: float):
+        """Rev B live tuning: which is one of p, i, d, f."""
+        if which not in ("p", "i", "d", "f"):
+            raise ValueError(f"gain must be p, i, d or f, not {which!r}")
+        self._write(f"{which} {value:.4f}")
+
+    def save_settings(self):
+        """Rev B: persist the encoder zero and the gains."""
+        self._write("w")
 
     # --- waiting -----------------------------------------------------------
 
