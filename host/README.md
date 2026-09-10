@@ -33,6 +33,79 @@ This matters more than it sounds, because **GOES-18 is geostationary at 137.0°W
 Peak it once, save the trim, and that number is your permanent site correction.
 It is the most valuable output of this program.
 
+## Where the pointing metric comes from
+
+`metric.py` is the signal side of the loop. It does not point anything; it
+produces the one number a peak search climbs, and tells you whether that
+number is stable enough to climb.
+
+**Nothing here does PID on signal strength.** SNR against pointing angle is a
+peak, not a ramp: the same reading occurs on both sides of it, so a controller
+fed SNR has no sign to act on. Peaking is a *search* — step, dwell, compare,
+reverse and halve when it gets worse. The sketch runs a PID on **angle**,
+where the error does have a sign, and this side hands it target angles.
+
+### Getting the number out of goesrecv
+
+goesrecv emits statsd over UDP, which is plain text on a datagram socket — no
+dependency, no polling, and it pushes rather than being asked:
+
+```
+[monitor]
+statsd_address = "udp://127.0.0.1:8125"
+```
+
+The metric names vary by goesrecv version, so they are **not** hardcoded here.
+Find out what your build actually emits:
+
+```bash
+python3 metric.py --discover
+```
+
+Then measure how noisy the one you picked is, with the dish **not moving**:
+
+```bash
+python3 metric.py --noise goesrecv.decoder.viterbi_errors --seconds 180
+```
+
+### Why the noise floor comes first
+
+This is the same test the reed switch got, for the same reason. There the
+question was how many edges arrive when nothing is turning. Here it is how
+much the metric wanders when nothing is pointing differently. Both answer the
+only question worth asking before building a loop on a sensor: is the thing
+you are about to react to actually a signal?
+
+The output is a table of dwell time against the standard deviation of the
+averaged reading. The rule it exists to serve:
+
+> one pointing step must change the metric by more than about **3×** the
+> standard deviation of the averaged reading at that dwell
+
+If it does not, the search is climbing noise, and it will walk away from a
+perfectly good peak with complete confidence. Longer dwell buys a quieter
+reading at roughly the square root of the time — and buys it out of the
+search's wall-clock budget, since every step pays it.
+
+### Which metric
+
+1. **Viterbi corrected errors** — steepest against pointing error, because it
+   sits after the demodulator where a fraction of a dB moves it a lot. Note
+   it goes **down** as the signal improves; `Metric(..., lower_is_better=True)`
+   exists because that sign is the easiest thing in the loop to get backwards.
+2. **Es/N0 or SNR** — smoother, slower, but it does not floor.
+3. **Raw RSSI or band power** — avoid. It measures noise as much as signal and
+   barely moves with pointing on a beam this wide. It is the obvious thing to
+   reach for and the wrong one.
+
+### If the metric floors at zero
+
+Corrected errors sitting at exactly zero across a range is **not a failed
+search**. It means you are comfortably inside the beam and pointing better
+buys nothing measurable. Either switch to a metric that does not saturate, or
+accept that anywhere in the flat region is a valid answer — which, for a
+geostationary bird you only peak once, it is.
+
 ## Setup
 
 ```bash

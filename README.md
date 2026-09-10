@@ -23,7 +23,8 @@ is the first sketch here that does; that part has not been on hardware yet.
 | `actuator_v1/` | **Compiles clean, 63% flash / 17% RAM on a 328P. Never run.** Rev A |
 | `as5600_test/` | **Rev B bring-up. Syntax-checked only, never run.** No motor code in it |
 | `actuator_v2/` | **Rev B. Syntax-checked against stubs, never compiled for AVR, never run** |
-| Host yaw pointing | Written, never executed — no Python on the build machine yet |
+| `host/metric.py` | **Runs.** Exercised against synthetic statsd; never seen a real receiver |
+| Rest of `host/` | Written, never executed — no Python on the build machine yet |
 
 An earlier lineage, `actuator_system/`, was deleted in favour of v1. It was
 written before any hardware existed and never ran, but it carried a simulator
@@ -415,8 +416,13 @@ backlash rather than tighter — see the tuning notes above.
   so it cannot replace the compass sighting behind `a` and `b`. What it can
   usefully do instead is in [WIRING.md](WIRING.md).
 - **The step-track search does not exist yet.** `actuator_v2/` is the inner
-  loop only; nothing on the host reads a metric out of `goesrecv` or walks the
-  target angle toward a peak. That is the next piece of real work.
+  loop only. `host/metric.py` now supplies the number it would climb — and is
+  the first file in `host/` that has actually been executed, against synthetic
+  statsd traffic — but nothing yet walks the target angle toward a peak. That
+  is the next piece of real work.
+- **The metric's own noise floor has never been measured on real signal**, and
+  it sets both the dwell and the smallest usable step. `metric.py --noise`
+  does it; it has not been pointed at a live receiver.
 - **The AS5600 magnet has never been mounted**, so the whole Rev B measurement
   chain is unverified end to end.
 - **Flash on Rev B is unmeasured** — there is no AVR toolchain on the build
