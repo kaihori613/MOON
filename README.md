@@ -121,11 +121,18 @@ linkage, is a hazard for no benefit when the position is already known.
 
 ### Auto — the calibration run
 
+
 Armed when SatDump is recording and a metric is actually arriving. **Triggered
 by a person or by a degraded-signal condition, not by the recording starting.**
 
 The run sweeps the travel, stopping to measure at each step, fits the readings,
-and parks on the best angle. That is `host/peak.py`.
+and parks on the best angle. That is `host/peak.py`. Every step of the sweep is
+itself a closed-loop move, so each angle it records is a settled encoder
+reading rather than something caught in passing.
+
+With ±15° hard stops the sweep can run to about ±12°, and the extra width
+helps: the least-squares fit gets its information from the flanks, so a wider
+sweep is a better one — see `host/README.md`.
 
 Two things about it are deliberate. It **stops to measure** rather than sweeping
 continuously, because an SNR estimate needs seconds of averaging and a reading
@@ -372,9 +379,22 @@ was wiped — every angle would simply be wrong by a constant, confidently, with
 no symptom. That is the same shape of failure v1 had with a back-driven dish,
 and it gets the same answer: a physical reference you can check against.
 
+**Not fitted yet.** `USE_REF_SWITCH` is `0`, so `h` and `H` decline rather than
+hunting for a switch that is not there. Until it exists, set the zero by hand:
+point the boom at a known heading — sight it against a compass, the way v1's
+`a`/`b` calibration did — then `z` to adopt that position as zero and `w` to
+save. What this costs is the whole reason the switch is on the list: **nothing
+in the system can then tell you the magnet has slipped on its hub**, and every
+angle would be wrong by a constant with no symptom.
+
+Driving to a hard stop and calling it ±15° also works as a one-off
+commissioning measurement, done manually at creep speed. It is not the same
+thing as routine homing into a safety device, which is what the next paragraph
+is about — but sighting the boom avoids the stops entirely and is preferable.
+
 **It is a third switch, not one of the cams.** Reusing the −10° limit was the
 first attempt and it was wrong. The cams are hard stops protecting the
-antenna: homing into one drives deliberately into a safety device, wearing the
+antenna at ±15°: homing into one drives deliberately into a safety device, wearing the
 cam-to-lever alignment that *is* the protection; it destroys "SW− is tripped"
 as an alarm, because that would also mean "we are homing"; and with the escape
 diodes fitted, current is cut the instant the cam opens, so every home would
@@ -492,7 +512,7 @@ which cut motor current themselves and are not connected to anything — so from
 outside, "we reached the end" can only be inferred from the reed going quiet
 while motion is still commanded, which is the same signature as a jam. That is
 why a stall stops the motor immediately rather than trying to tell the two
-apart. Separate from those, Rev B adds **cam switches at ±10°** on the pivot,
+apart. Separate from those, Rev B adds **cam switches at ±15°** on the pivot,
 which do report to D3 and D4 as well as cutting current in hardware.
 
 **The internal cams have been confirmed to cut on the bench.** The whole
@@ -523,8 +543,16 @@ and `Config.h` cannot drift apart.
 
 Everything tunable lives in `actuator_v2/Config.h` — pins, gains, tolerances,
 timeouts. That is the only file that should need editing for a hardware change.
-`actuator_v1/Config.h` is Rev A's and still carries `MOTOR_DRIVER`, which Rev B
-does not have: the G2's two-pin interface is the only one v2 speaks.
+`MOTOR_DRIVER` survives into Rev B and defaults to `DRV_L298N`, which is what
+is on the bench. `DRV_G2` switches to the Pololu's two-pin interface. Both are
+syntax-checked on every change, in all four combinations with `USE_REF_SWITCH`,
+so switching later stays a config change rather than a rewrite.
+
+**The L298N at 25 V needs three things:** the `5V-EN` jumper off, the two
+bridges paralleled for ~4 A, and a real heatsink — the Darlington outputs drop
+2–3 V regardless of load, so at 3 A that is 7 W in the package. It is inside
+its voltage rating and the duty cycle here is tiny, but measure the stall
+current before trusting it. WIRING.md has the detail.
 
 **Set `ENCODER_INVERT` and `ENCODER_ZERO_DEFAULT` from an `as5600_test/` run
 before enabling the loop.** An inverted encoder makes the PID positive
@@ -581,6 +609,9 @@ backlash rather than tighter — see the tuning notes above.
   MPU6050 **cannot measure yaw** — it is a six-axis part with no magnetometer,
   so it cannot replace the compass sighting behind `a` and `b`. What it can
   usefully do instead is in [WIRING.md](WIRING.md).
+- **The reference switch does not exist yet**, so the encoder zero is set by
+  hand and unchecked. That is the single largest hole in the measurement
+  chain: a slipped magnet would be invisible.
 - **`REF_ANGLE_DEG` is a placeholder.** It is where the reference switch
   physically sits, and `H` adopts it as truth, so the whole coordinate system
   inherits whatever is in there. Measure it against the boom once.

@@ -14,10 +14,10 @@ is still in git history and `actuator_v1/` still runs it.
 |---|---|---|
 | Position | reed pulses, signed by commanded direction | AS5600 absolute angle on the pivot |
 | Homing | drive into the retract cam every boot, required before any move | no homing; a separate mid-travel reference switch checks the stored zero |
-| Bridge | L298N | Pololu G2 24v13 |
+| Bridge | L298N | still the L298N on the bench; `MOTOR_DRIVER` selects the G2 when it arrives |
 | Reed | the position sensor | motion witness only |
 | IMU | MPU6050 planned | dropped |
-| Limits | actuator's internal cams only | cams at ±10° that cut current, plus the actuator's own |
+| Limits | actuator's internal cams only | cams at ±15° that cut current, plus the actuator's own |
 
 Three things drove it. The reed had no direction and sat on the motor side of
 the leadscrew backlash, so it measured the wrong quantity in the wrong place.
@@ -30,26 +30,51 @@ L298N is a 2 A part with a 2–3 V drop being asked to run a jack at 25 V.
 |---|---|---|
 | D0, D1 | USB serial | Console, and the target-angle channel from the host |
 | D2 | Reed switch | **INT0.** Health witness — nothing integrates it any more |
-| D3 | Limit flag, +10° | NC to GND, `INPUT_PULLUP` |
-| D4 | Limit flag, −10° | NC to GND, `INPUT_PULLUP` |
-| D5 | **Reference switch** | Mid-travel, to GND. Not a stop — see below |
-| D7 | Driver DIR | |
-| D8 | Driver **/SLP** | **Must be driven HIGH** or the bridge stays asleep |
-| D9 | Driver PWM | Timer1 |
+| D3 | Limit flag, +15° | NC to GND, `INPUT_PULLUP` |
+| D4 | Limit flag, −15° | NC to GND, `INPUT_PULLUP` |
+| D10 | **Reference switch** | Mid-travel, to GND. Not a stop — see below. **Not fitted yet** |
+| D5 | L298N **IN2** | `digitalWrite` only, never PWM |
+| D6 | L298N **IN1** | `digitalWrite` only, never PWM |
+| D9 | L298N **ENA** | PWM, Timer1 |
 | D11 | Buzzer | Via a transistor |
 | A0 · A1 · A2 | Buttons | To GND, `INPUT_PULLUP` |
-| A3 | Driver current sense | Analog. Stall detection, free with this driver |
+| A3 | Driver current sense | Analog. The G2 provides one; the L298N module usually grounds its sense pins, so `USE_CURRENT_LIMIT` stays off |
 | A4 | I2C SDA | AS5600 at 0x36, through a level shifter |
 | A5 | I2C SCL | " |
-| D6, D10, D12, D13 | free | Four spare |
+| D7, D8, D12, D13 | free | Four spare. D7/D8 are the G2's DIR and /SLP when that driver is selected |
 
 **I2C is A4/A5 and cannot be moved.** `Wire` on a 328P is tied to that
 peripheral. An encoder on any other pin will not enumerate.
 
-`/SLP` is the pin most easily forgotten. The G2 boots asleep; a perfectly
-correct PWM into a sleeping bridge moves nothing, and it looks exactly like a
-dead motor. `actuator_v2` drives it low in `setup()` and only raises it inside
-`driveSigned()`, so it doubles as the hard off switch.
+`MOTOR_DRIVER` in `Config.h` picks the pin set. It defaults to `DRV_L298N`,
+which is what is on the bench and uses the same three pins v1 did — that being
+the only code that has ever turned this motor. `DRV_G2` switches to the
+Pololu's two-pin interface on D7/D9 plus `/SLP` on D8.
+
+`/SLP` is the pin most easily forgotten on the G2. It boots asleep, and a
+perfectly correct PWM into a sleeping bridge moves nothing while looking
+exactly like a dead motor. `actuator_v2` drives it low in `setup()` and only
+raises it inside `driveSigned()`, so it doubles as the hard off switch.
+
+### Running the L298N at 25 V
+
+It is inside the part's voltage rating — Vs goes to 46 V — so the volts are
+not the problem. Three other things are, and all are survivable for bring-up
+because the duty cycle is tiny: a move takes seconds and then the dish sits
+for hours, so thermal mass matters more than the continuous rating.
+
+1. **Current.** 2 A per channel. **Parallel the two bridges** — IN1 to IN3,
+   IN2 to IN4, ENA to ENB, OUT1 to OUT3, OUT2 to OUT4 — for about 4 A. The
+   second bridge is sitting idle and the datasheet sanctions this.
+2. **Heat.** The outputs are Darlingtons and drop 2–3 V regardless of load. At
+   3 A that is ~7 W in the package, and the postage-stamp heatsink on the red
+   modules will not carry it. Fit a real one.
+3. **The drop comes off the motor.** 25 V in, roughly 22 V at the actuator.
+   Harmless, but the duty numbers found during tuning will not transfer
+   unchanged to a MOSFET bridge later.
+
+**Measure the stall current before deciding this is fine.** Over about 3 A
+even paralleled and the L298N is the wrong part.
 
 ## The encoder
 
@@ -69,7 +94,7 @@ correctly mounted magnet from one that merely produces plausible numbers on
 the bench and drifts once it is on the mount.
 
 **Keep the working range away from the wrap.** The part reads 0–4095 and rolls
-over. Fit the magnet so ±10° of travel sits near raw 2048. `angleDiff()` is
+over. Fit the magnet so ±15° of travel sits near raw 2048. `angleDiff()` is
 wrap-safe either way, but a rollover inside the travel makes every number on
 the console confusing to read.
 
@@ -90,14 +115,14 @@ Don't run it direct and rely on it working on the bench.
 
 Three layers, and they are deliberately not redundant with each other:
 
-1. **Soft limit**, ±9° in `Config.h`, refused before a move starts
-2. **Cam microswitches** at ±10° on the pivot, which cut motor current
+1. **Soft limit**, ±13° in `Config.h`, refused before a move starts
+2. **Cam microswitches** at ±15° on the pivot, which cut motor current
 3. **The actuator's own internal cams** at the ends of the stroke
 
 Normal operation should never reach layer 2. A cam trip means something went
 wrong, not "Tuesday".
 
-**Put the cams on the pivot, not on the rod.** ±10° of boom is not a fixed
+**Put the cams on the pivot, not on the rod.** ±15° of boom is not a fixed
 amount of rod travel — the linkage is a triangle, so the ratio changes along
 the stroke. Cams on the pivot measure the angle directly and stay correct
 everywhere; cams on the rod would only be right at one extension.
@@ -134,7 +159,13 @@ onto each cam slowly and confirm you can still drive off it.
 
 ## The reference switch
 
-A **third** switch, mid-travel, on D5. It is deliberately not one of the cams.
+**Not fitted yet.** `USE_REF_SWITCH` is `0`, so `h` and `H` decline rather
+than driving off to look for a switch that is not there, and no crossing is
+watched for. Until it exists the encoder zero is set by hand and then simply
+trusted — see the README for that procedure, and note what it costs: nothing
+in the system can tell you the magnet has slipped on its hub.
+
+A **third** switch, mid-travel, on D10. It is deliberately not one of the cams.
 
 ### Why not reuse a limit switch
 
@@ -195,8 +226,8 @@ has to be entered, never traversed at a known speed.
 
 ## Hard stops
 
-The ±10° cams are now purely protective. `actuator_v2` treats driving into one
-as a **fault**, not a waypoint: the soft limit at ±9° should have stopped the
+The ±15° cams are now purely protective. `actuator_v2` treats driving into one
+as a **fault**, not a waypoint: the soft limit at ±13° should have stopped the
 move first, so reaching a cam means something went wrong. Clear it with `k`
 and jog away — the firmware blocks the direction that would go further in and
 allows the one that escapes.

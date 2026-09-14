@@ -154,7 +154,11 @@ bool limitNeg() { return digitalRead(PIN_LIM_NEG) == HIGH; }
 // The reference switch carries no safety duty, so unlike the cams it is wired
 // only to this pin -- nothing it does interrupts motor current. Active LOW to
 // GND with INPUT_PULLUP, same as everything else here.
+#if USE_REF_SWITCH
 bool refActive() { return digitalRead(PIN_REF) == LOW; }
+#else
+bool refActive() { return false; }        // not fitted
+#endif
 
 // ---------------------------------------------------------------------------
 //  Motor
@@ -166,9 +170,16 @@ static bool     g_limitBlocked = false;  // last call was clipped by a cam
 static unsigned long g_coastUntil = 0;
 
 void motorOff() {
+#if MOTOR_DRIVER == DRV_L298N
+  analogWrite(PIN_ENA, 0);
+  digitalWrite(PIN_ENA, LOW);        // detach the PWM, whichever timer drove it
+  digitalWrite(PIN_IN1, LOW);        // and coast rather than brake
+  digitalWrite(PIN_IN2, LOW);
+#else
   analogWrite(PIN_PWM, 0);
-  digitalWrite(PIN_PWM, LOW);        // detach the PWM, whichever timer drove it
-  digitalWrite(PIN_SLP, LOW);        // and put the bridge to sleep
+  digitalWrite(PIN_PWM, LOW);
+  digitalWrite(PIN_SLP, LOW);        // put the bridge to sleep
+#endif
   g_duty = 0;
   g_lastSign = 0;
 }
@@ -198,9 +209,17 @@ void driveSigned(int duty) {
 
   if (sign == 0) { motorOff(); return; }
 
+#if MOTOR_DRIVER == DRV_L298N
+  // Direction first, then enable: setting IN1/IN2 while ENA is already high
+  // walks the bridge through a state it does not need to see.
+  digitalWrite(PIN_IN1, sign > 0 ? HIGH : LOW);
+  digitalWrite(PIN_IN2, sign > 0 ? LOW  : HIGH);
+  analogWrite(PIN_ENA, (uint8_t)abs(duty));
+#else
   digitalWrite(PIN_SLP, HIGH);
   digitalWrite(PIN_DIR, sign > 0 ? HIGH : LOW);
   analogWrite(PIN_PWM, (uint8_t)abs(duty));
+#endif
   g_duty = duty;
   g_lastSign = sign;
 }
@@ -521,7 +540,7 @@ bool buttonPoll(Button &b) {
 // ---------------------------------------------------------------------------
 //  Reference switch
 // ---------------------------------------------------------------------------
-//  Not a hard stop, and never confused with one. The +/-10 deg cams protect
+//  Not a hard stop, and never confused with one. The +/-15 deg cams protect
 //  the antenna and are a fault when reached; this switch sits inside the
 //  travel, carries no safety duty, and exists only so the stored ZERO can be
 //  checked against a physical fact.
@@ -529,6 +548,8 @@ bool buttonPoll(Button &b) {
 //  Because it is mid-travel the boom crosses it on ordinary moves, so most
 //  checking is passive -- no procedure to remember. 'h' forces a deliberate
 //  slow pass when the authoritative number is wanted.
+
+#if USE_REF_SWITCH
 
 // Called exactly once per tick. Returns true on an inactive->active edge.
 bool refEdge() {
@@ -684,6 +705,26 @@ void refPassTick(bool entering) {
       break;
   }
 }
+
+#else   // ------------------------------------------------------- not fitted
+
+// Stubs, so nothing else has to know. The reference switch is the only thing
+// that can discover the encoder's zero has moved: a slipped magnet or a wiped
+// EEPROM makes every angle wrong by a constant, confidently, with no symptom.
+// Without it the zero is set by hand and then simply trusted.
+
+bool refEdge() { return false; }
+void refPassive(bool entering) { (void)entering; }
+
+void beginRefPass(bool adopt) {
+  (void)adopt;
+  Serial.println(F("no reference switch fitted (USE_REF_SWITCH is 0)"));
+  Serial.println(F("set the zero by hand: point the boom at a known heading,"));
+  Serial.println(F("then 'z' to adopt it and 'w' to save. Nothing can check"));
+  Serial.println(F("that number for you until the switch exists."));
+}
+
+#endif  // USE_REF_SWITCH
 
 // ---------------------------------------------------------------------------
 //  Manual mode
@@ -951,17 +992,28 @@ void pollSerial() {
 void setup() {
   // Claim the bridge low BEFORE anything else. An unconfigured output is a
   // floating input, and a driver gets to decide for itself what that means.
+#if MOTOR_DRIVER == DRV_L298N
+  pinMode(PIN_ENA, OUTPUT);
+  pinMode(PIN_IN1, OUTPUT);
+  pinMode(PIN_IN2, OUTPUT);
+  digitalWrite(PIN_ENA, LOW);
+  digitalWrite(PIN_IN1, LOW);
+  digitalWrite(PIN_IN2, LOW);
+#else
   pinMode(PIN_PWM, OUTPUT);
   pinMode(PIN_DIR, OUTPUT);
   pinMode(PIN_SLP, OUTPUT);
   digitalWrite(PIN_PWM, LOW);
   digitalWrite(PIN_DIR, LOW);
   digitalWrite(PIN_SLP, LOW);
+#endif
 
   pinMode(PIN_REED,    INPUT_PULLUP);
   pinMode(PIN_LIM_POS, INPUT_PULLUP);
   pinMode(PIN_LIM_NEG, INPUT_PULLUP);
+#if USE_REF_SWITCH
   pinMode(PIN_REF,     INPUT_PULLUP);
+#endif
 #if USE_BUTTONS
   pinMode(PIN_BTN_EXTEND,  INPUT_PULLUP);
   pinMode(PIN_BTN_RETRACT, INPUT_PULLUP);
@@ -993,7 +1045,9 @@ void setup() {
   }
 
   encoderPoll();
+#if USE_REF_SWITCH
   g_refPrev = refActive();   // so boot never looks like a crossing
+#endif
   if (!g_encOk) {
     raiseFault(F_ENCODER);
   } else {
@@ -1079,10 +1133,12 @@ void loop() {
       break;
     }
 
+#if USE_REF_SWITCH
     case ST_REFPASS:
       if (!healthOk()) break;
       refPassTick(refEntering);
       break;
+#endif
 
 #if USE_BUTTONS
     case ST_MANUAL:

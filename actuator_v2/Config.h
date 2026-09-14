@@ -24,13 +24,67 @@
 // ===========================================================================
 //  1. PINS
 // ===========================================================================
-//  Pololu G2 24v13. Two-pin interface -- a direction bit and one PWM -- which
-//  is why IN1/IN2 are gone. /SLP must be driven HIGH or the driver stays
-//  asleep and the motor never moves however good the PWM looks.
-const uint8_t PIN_PWM = 9;      // Timer1. Never pins 5/6: analogWrite(0) on
-const uint8_t PIN_DIR = 7;      //   Timer0 may not fully release the output.
-const uint8_t PIN_SLP = 8;      // HIGH = awake. LOW is the hard off switch.
-const uint8_t PIN_CS  = A3;     // driver current sense, analog
+//  Two drivers are supported. Set MOTOR_DRIVER to whichever is actually
+//  wired, the way v1 did -- switching should be a config change, not a
+//  rewrite.
+//
+//  DRV_L298N is what is on the bench. At 25 V it is inside its voltage
+//  rating, but read section 1b before trusting it: the current and the heat
+//  are the problems, not the volts.
+//
+//  DRV_G2 is the Pololu G2 24v13, the intended eventual part. Two-pin
+//  interface -- one direction bit and one PWM -- plus /SLP, which MUST be
+//  driven HIGH or the bridge stays asleep and a perfectly correct PWM moves
+//  nothing while looking exactly like a dead motor.
+#define DRV_L298N 1
+#define DRV_G2    2
+
+#define MOTOR_DRIVER  DRV_L298N      // <-- match your hardware
+
+#if MOTOR_DRIVER == DRV_L298N
+  // Same pins v1 used, because that is the code that has actually turned the
+  // motor. ENA is Timer1; IN1/IN2 are digitalWrite only, never PWM.
+  const uint8_t PIN_ENA = 9;
+  const uint8_t PIN_IN1 = 6;
+  const uint8_t PIN_IN2 = 5;
+#elif MOTOR_DRIVER == DRV_G2
+  const uint8_t PIN_PWM = 9;   // Timer1. Never 5/6: analogWrite(0) on Timer0
+  const uint8_t PIN_DIR = 7;   //   may not fully release the output.
+  const uint8_t PIN_SLP = 8;   // HIGH = awake. LOW is the hard off switch.
+#else
+  #error "Set MOTOR_DRIVER to DRV_L298N or DRV_G2"
+#endif
+
+// Current sense. The G2 provides one; the L298N module's sense pins are
+// usually jumpered to ground, so leave USE_CURRENT_LIMIT off with it.
+const uint8_t PIN_CS = A3;
+
+// ===========================================================================
+//  1b. RUNNING AN L298N AT 25 V
+// ===========================================================================
+//  It is within the part's voltage rating -- Vs goes to 46 V -- so the volts
+//  are not the issue. Three other things are, and all three are survivable
+//  for bring-up on a duty cycle this low: a move takes seconds and then the
+//  dish sits still for hours, so thermal mass matters more than the
+//  continuous rating.
+//
+//    1. CURRENT. 2 A per channel. PARALLEL THE TWO BRIDGES -- tie IN1 to IN3,
+//       IN2 to IN4, ENA to ENB, OUT1 to OUT3 and OUT2 to OUT4 -- and you get
+//       about 4 A. The second bridge is sitting there unused; there is no
+//       reason not to. The datasheet sanctions it and the on-resistance
+//       handles the sharing.
+//
+//    2. HEAT. The outputs are Darlingtons, so they drop 2-3 V regardless of
+//       load. At 3 A that is 7 W in the package, and the postage-stamp
+//       heatsink on the red modules will not carry it. Fit a real one.
+//
+//    3. THE DROP COMES OFF THE MOTOR. 25 V in, roughly 22 V at the actuator.
+//       Harmless here, but it means the duty numbers found during tuning do
+//       not transfer unchanged to a MOSFET bridge later.
+//
+//  Measure the stall current before deciding this is fine. If it is over
+//  about 3 A even paralleled, the L298N is the wrong part and the G2 branch
+//  above is waiting.
 
 // Reed switch. Still on INT0, but it is no longer a position sensor -- see
 // section 5. Nothing here integrates it.
@@ -44,9 +98,10 @@ const uint8_t PIN_LIM_POS = 3;
 const uint8_t PIN_LIM_NEG = 4;
 
 // Reference switch, mid-travel. NOT one of the hard stops -- see section 4b
-// for why that distinction is the whole point. D5 is free for it because
-// motor PWM is Timer1 (D9), so nothing here needs Timer0's pins.
-const uint8_t PIN_REF = 5;
+// for why that distinction is the whole point. D10 rather than D5, because
+// D5 is the L298N's IN2 and a pin map that only works on one driver is a trap.
+// NOT FITTED YET: USE_REF_SWITCH is 0 in section 4b.
+const uint8_t PIN_REF = 10;
 
 const uint8_t PIN_BTN_EXTEND  = A0;
 const uint8_t PIN_BTN_RETRACT = A1;
@@ -148,17 +203,19 @@ const uint8_t SPEED_BUTTON = SPEED_SLOW;
 // ===========================================================================
 //  Three layers, outermost last:
 //    1. soft limit here, in firmware, from the encoder
-//    2. the cam microswitches at +/-10 deg, which cut current in hardware
+//    2. the cam microswitches at +/-15 deg, which cut current in hardware
 //    3. the actuator's own internal cams at the ends of the stroke
 //
 //  Keep the soft limit inside the cams so normal operation never reaches
-//  them; a cam trip should mean something went wrong, not "Tuesday".
-const float SOFT_LIMIT_DEG = 9.0f;
+//  them; a cam trip should mean something went wrong, not "Tuesday". Two
+//  degrees of margin covers coast plus backlash with room to spare.
+const float HARD_STOP_DEG  = 15.0f;   // where the cams physically are
+const float SOFT_LIMIT_DEG = 13.0f;   // where the firmware refuses to go
 
 // ===========================================================================
 //  4b. REFERENCE SWITCH  --  a THIRD switch, mid-travel
 // ===========================================================================
-//  The +/-10 deg cams are HARD STOPS. They exist to protect the antenna, they
+//  The +/-15 deg cams are HARD STOPS. They exist to protect the antenna, they
 //  cut motor current in hardware, and normal operation must never reach them
 //  -- a cam trip is a fault, not a step in a procedure.
 //
@@ -201,7 +258,12 @@ const float SOFT_LIMIT_DEG = 9.0f;
 //
 //  Both are captured on the INACTIVE->ACTIVE edge, so the lobe only has to be
 //  entered, never traversed at a known speed.
-#define USE_REF_SWITCH 1
+//  NOT FITTED YET. With this at 0 the 'h' and 'H' commands decline instead of
+//  driving off to look for a switch that is not there, and no crossing is
+//  watched for. Setting the encoder zero is then a manual step -- see the
+//  README -- and there is nothing that can tell you the magnet has slipped,
+//  which is the capability this switch exists to provide.
+#define USE_REF_SWITCH 0
 
 // Roughly where the switch sits. Only used to plan the deliberate pass; the
 // stored raw counts are what is actually believed. Put it off the angle the
