@@ -256,3 +256,140 @@ def sweep(move_to, read_metric, lo, hi, step,
 
     move_to(best_angle)
     return PeakResult(best_angle, best_score, samples, interpolated)
+
+
+# ---------------------------------------------------------------------------
+#  Pointing health -- the reference switch, done in software
+# ---------------------------------------------------------------------------
+#  An earlier revision planned a mid-travel reference switch, on the argument
+#  that the encoder's zero could creep with no symptom. The first half of that
+#  is true and the second half is not: the satellite IS a reference, and a
+#  continuously available, extremely sensitive one. If the zero drifts, the
+#  metric at the stored angle falls.
+#
+#  Better still, the drift needs no separate repair. A calibration run does
+#  not care what "zero" means -- it finds the encoder reading with the best
+#  signal and stores that -- so a shifted zero is absorbed into the next run
+#  automatically.
+#
+#  So what a health check has to do is narrower than a switch: notice that
+#  the signal at the aimed angle is no longer what calibration recorded, and
+#  say so. It catches a shifted mount, a slipped magnet, a wet LNA and a
+#  failing feed all at once, which is more useful than knowing specifically
+#  that the magnet moved.
+
+class PointingReference:
+    """
+    What a calibration run established, and what the health check compares
+    against. Persist it next to the trim; the caller owns storage.
+    """
+
+    def __init__(self, angle, metric_mean, metric_stdev, metric_name="",
+                 lower_is_better=False, when=None, beamwidth_deg=None):
+        self.angle = angle
+        self.metric_mean = metric_mean
+        self.metric_stdev = metric_stdev
+        self.metric_name = metric_name
+        self.lower_is_better = lower_is_better
+        self.when = when
+        self.beamwidth_deg = beamwidth_deg
+
+    @property
+    def score(self):
+        return -self.metric_mean if self.lower_is_better else self.metric_mean
+
+    def to_dict(self):
+        return {"angle_deg": self.angle, "metric_mean": self.metric_mean,
+                "metric_stdev": self.metric_stdev, "metric_name": self.metric_name,
+                "lower_is_better": self.lower_is_better, "when": self.when,
+                "beamwidth_deg": self.beamwidth_deg}
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(d["angle_deg"], d["metric_mean"], d.get("metric_stdev", 0.0),
+                   d.get("metric_name", ""), d.get("lower_is_better", False),
+                   d.get("when"), d.get("beamwidth_deg"))
+
+
+class HealthVerdict:
+    OK        = "ok"
+    IMPROVED  = "improved"
+    DEGRADED  = "degraded"
+    FAILED    = "failed"
+    NO_SIGNAL = "no-signal"
+
+    def __init__(self, status, drop=None, threshold=None, now=None,
+                 implied_error_deg=None, message=""):
+        self.status = status
+        self.drop = drop                      # score units, positive = worse
+        self.threshold = threshold            # what it had to beat to count
+        self.now = now
+        self.implied_error_deg = implied_error_deg
+        self.message = message
+
+    @property
+    def needs_repeak(self):
+        return self.status in (HealthVerdict.DEGRADED, HealthVerdict.FAILED)
+
+    def __repr__(self):
+        return f"<HealthVerdict {self.status}: {self.message}>"
+
+
+def check_pointing(reference, read_metric, warn=2.0, fail=4.0, sigmas=3.0):
+    """
+    Compare the metric now against what calibration recorded.
+
+    warn and fail are in the metric's own units (dB for an SNR). The actual
+    threshold is the LARGER of that and `sigmas` times the combined noise of
+    the two readings, for the same reason the reed had a debounce and the
+    moment estimator has a significance gate: a system that reacts to its own
+    measurement noise will re-peak a perfectly good dish on a windy afternoon
+    and store whatever it happens to find.
+
+    Never moves anything. It reports; the caller decides.
+    """
+    try:
+        mean, stdev, _n = read_metric()
+    except Exception as exc:
+        return HealthVerdict(
+            HealthVerdict.NO_SIGNAL, message=f"no reading at all ({exc})")
+
+    now_score = -mean if reference.lower_is_better else mean
+    drop = reference.score - now_score          # positive means worse
+
+    noise = ((reference.metric_stdev ** 2 + stdev ** 2) ** 0.5) * sigmas
+    warn_at = max(warn, noise)
+    fail_at = max(fail, noise)
+
+    # A drop only means a pointing error if pointing is what changed, but the
+    # implied angle is still the useful sanity check: it says whether
+    # re-peaking could plausibly recover this, or whether the number is far too
+    # large for any pointing error the mount can even reach.
+    implied = None
+    if reference.beamwidth_deg and drop > 0:
+        implied = reference.beamwidth_deg * (drop / 12.0) ** 0.5
+
+    if drop >= fail_at:
+        msg = f"down {drop:.2f} against a {fail_at:.2f} threshold"
+        if implied is not None:
+            msg += f"; a pointing error of about {implied:.1f} deg would explain it"
+        return HealthVerdict(HealthVerdict.FAILED, drop, fail_at, now_score,
+                             implied, msg)
+
+    if drop >= warn_at:
+        msg = f"down {drop:.2f} against a {warn_at:.2f} threshold"
+        if implied is not None:
+            msg += f"; about {implied:.1f} deg of pointing error would explain it"
+        return HealthVerdict(HealthVerdict.DEGRADED, drop, warn_at, now_score,
+                             implied, msg)
+
+    if -drop >= warn_at:
+        # Worth saying rather than swallowing: it usually means the reference
+        # was taken in poor conditions and is not the standard to hold to.
+        return HealthVerdict(
+            HealthVerdict.IMPROVED, drop, warn_at, now_score, None,
+            f"up {-drop:.2f} on the reference -- calibration may have been "
+            f"taken in worse conditions than these")
+
+    return HealthVerdict(HealthVerdict.OK, drop, warn_at, now_score, None,
+                         f"within {warn_at:.2f} of the reference")

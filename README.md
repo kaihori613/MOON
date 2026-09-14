@@ -379,42 +379,27 @@ was wiped — every angle would simply be wrong by a constant, confidently, with
 no symptom. That is the same shape of failure v1 had with a back-driven dish,
 and it gets the same answer: a physical reference you can check against.
 
-**Not fitted yet.** `USE_REF_SWITCH` is `0`, so `h` and `H` decline rather than
-hunting for a switch that is not there. Until it exists, set the zero by hand:
-point the boom at a known heading — sight it against a compass, the way v1's
-`a`/`b` calibration did — then `z` to adopt that position as zero and `w` to
-save. What this costs is the whole reason the switch is on the list: **nothing
-in the system can then tell you the magnet has slipped on its hub**, and every
-angle would be wrong by a constant with no symptom.
+**A reference switch was designed and is probably not needed.**
+`USE_REF_SWITCH` is `0`. The case for it was that the encoder's zero can creep
+silently — zero is a raw count in EEPROM, and a slipped magnet makes every
+angle wrong by a constant. That first half is true; "silently" is not. **The
+satellite is a reference**, continuously available and far more sensitive than
+a microswitch, and the drift even repairs itself: a calibration run finds the
+encoder reading with the best signal and stores *that*, so a shifted zero is
+absorbed by the next run.
 
-Driving to a hard stop and calling it ±15° also works as a one-off
-commissioning measurement, done manually at creep speed. It is not the same
-thing as routine homing into a safety device, which is what the next paragraph
-is about — but sighting the boom avoids the stops entirely and is preferable.
+What a switch would add is telling "the mount moved" from "the sensor moved" —
+a diagnostic nicety, since you re-peak either way. `host/peak.py`'s
+`check_pointing()` does the detecting in software instead, and catches a
+shifted mount, a slipped magnet, a wet LNA and a failing feed at once. The
+firmware branch stays, guarded and compiling, in case a reason appears.
 
-**It is a third switch, not one of the cams.** Reusing the −10° limit was the
-first attempt and it was wrong. The cams are hard stops protecting the
-antenna at ±15°: homing into one drives deliberately into a safety device, wearing the
-cam-to-lever alignment that *is* the protection; it destroys "SW− is tripped"
-as an alarm, because that would also mean "we are homing"; and with the escape
-diodes fitted, current is cut the instant the cam opens, so every home would
-end with the mechanism hard-cut by a safety circuit rather than decelerating
-under control. `actuator_v2` now treats driving into a cam as a **fault**.
-
-The reference switch sits mid-travel, carries no safety duty, and is crossed
-in transit. That turns checking from a procedure into **passive monitoring** —
-the firmware captures every ordinary crossing and warns only when it drifts.
-
-- `h` — deliberate slow pass in both directions, report drift, change nothing
-- `H` — the same, but adopt the crossings and re-derive zero
-
-**Two references, one per direction.** A microswitch's trip and release points
-differ, so a crossing is only repeatable per direction; each is compared
-against its own stored value. Their difference is the lobe width plus
-hysteresis, a constant of the mechanism and a free diagnostic — if it changes,
-the lever is bending or the cam is loose. Zero is derived from the *midpoint*
-of the two, which cancels the hysteresis rather than inheriting whichever
-direction happened to be captured.
+**What is lost is narrower than it sounds.** Relative angle is unaffected — the
+encoder reads the boom continuously and absolutely to 0.0879°, and the sweep
+knows the exact angle of every sample. Only the *label* on the scale is
+arbitrary: `0.0°` means wherever the boom was when `z` was typed. Pointing at a
+geostationary bird needs only the relative part. To put a true heading on the
+scale, sight the boom against a known bearing, then `z` and `w`.
 
 **The reed is kept as a witness.** It measures nothing, but it catches two
 failures neither sensor sees alone:
@@ -609,9 +594,10 @@ backlash rather than tighter — see the tuning notes above.
   MPU6050 **cannot measure yaw** — it is a six-axis part with no magnetometer,
   so it cannot replace the compass sighting behind `a` and `b`. What it can
   usefully do instead is in [WIRING.md](WIRING.md).
-- **The reference switch does not exist yet**, so the encoder zero is set by
-  hand and unchecked. That is the single largest hole in the measurement
-  chain: a slipped magnet would be invisible.
+- **`check_pointing()` has never run against a real link**, so the warn and
+  fail thresholds are guesses. They want setting from the metric's measured
+  noise floor, the same way the reed's debounce was set from its gap
+  histogram.
 - **`REF_ANGLE_DEG` is a placeholder.** It is where the reference switch
   physically sits, and `H` adopts it as truth, so the whole coordinate system
   inherits whatever is in there. Measure it against the boom once.

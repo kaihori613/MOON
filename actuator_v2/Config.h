@@ -213,78 +213,62 @@ const float HARD_STOP_DEG  = 15.0f;   // where the cams physically are
 const float SOFT_LIMIT_DEG = 13.0f;   // where the firmware refuses to go
 
 // ===========================================================================
-//  4b. REFERENCE SWITCH  --  a THIRD switch, mid-travel
+//  4b. REFERENCE SWITCH  --  designed, and probably not needed
 // ===========================================================================
-//  The +/-15 deg cams are HARD STOPS. They exist to protect the antenna, they
-//  cut motor current in hardware, and normal operation must never reach them
-//  -- a cam trip is a fault, not a step in a procedure.
+//  An earlier revision planned a third switch, mid-travel, on the argument
+//  that the encoder's zero can creep with no symptom: zero is a raw count in
+//  EEPROM, and a magnet that slips on its hub makes every angle wrong by a
+//  constant.
 //
-//  So the reference does NOT reuse one of them. An earlier revision did, and
-//  it was wrong for three reasons that all matter more than saving a pin:
+//  The first half of that is true. The second half is not, and it is why
+//  USE_REF_SWITCH is 0 and likely to stay there. THE SATELLITE IS A
+//  REFERENCE, continuously available and far more sensitive than any
+//  microswitch: if the zero drifts, the signal at the aimed angle falls, and
+//  the receiver is being watched anyway.
 //
-//    * every home drove deliberately into a safety device, wearing the switch
-//      and, worse, the cam-to-lever alignment that IS the protection;
-//    * "the minus cam is tripped" stopped being an alarm condition, because
-//      it also meant "we are homing" -- so a genuine runaway looked normal;
-//    * the escape diodes cut current the instant the cam opens, so every home
-//      ended with the mechanism hard-cut by a safety circuit rather than
-//      decelerating under control. Twice per home, forever.
+//  Better still, the drift repairs itself. A calibration run does not care
+//  what "zero" means -- it finds the encoder reading with the best signal and
+//  stores that -- so a shifted zero is absorbed into the next run.
 //
-//  Instead there is a third switch somewhere inside the travel, crossed in
-//  transit and never rested on. It carries no safety duty at all, so driving
-//  across it is free.
+//  What the switch would add over that is the ability to tell "the mount
+//  moved" from "the sensor moved". Both look like "signal is worse than it
+//  was", and for RECOVERY the distinction does not matter, because you
+//  re-peak either way. It is a diagnostic convenience costing a switch, a
+//  pin, a cam lobe, outdoor wiring and one more thing to fail on a mast.
 //
-//  WHAT IT IS FOR
+//  host/peak.py's check_pointing() does the detecting instead, and catches a
+//  shifted mount, a slipped magnet, a wet LNA and a failing feed in one test.
 //
-//  The encoder is absolute, but its ZERO is not: zero is a raw count in
-//  EEPROM, and nothing in the encoder can reveal that the magnet has crept on
-//  its hub or that the EEPROM was wiped. Every angle would be wrong by a
-//  constant, confidently, with no symptom. The reference switch is the
-//  physical fact you check that against.
+//  A reference switch WOULD earn its place on a system that cannot verify
+//  against its payload -- a telescope that only observes at night, a machine
+//  tool where a bad zero ruins the work before anyone notices. None of that
+//  is this. The code below stays because it is written and guarded and costs
+//  nothing at 0; fit the switch only if a reason appears that the signal
+//  cannot cover.
 //
-//  Being mid-travel turns that from a procedure into passive monitoring. The
-//  boom crosses the switch on ordinary moves, so the firmware captures the
-//  crossing every time and compares it -- no homing cycle to remember to run.
-//  'h' forces a deliberate slow pass when you want the authoritative number.
-//
-//  WHY TWO STORED REFERENCES
-//
-//  A microswitch's trip point and release point differ, so the crossing is
-//  only repeatable per DIRECTION. Crossing while moving positive and crossing
-//  while moving negative are two different, individually stable numbers, and
-//  each is compared against its own reference. Their difference is the lobe
-//  width plus hysteresis -- a constant of the mechanism, and a free diagnostic
-//  in its own right: if it changes, the lever is bending or the cam is loose.
-//
-//  Both are captured on the INACTIVE->ACTIVE edge, so the lobe only has to be
-//  entered, never traversed at a known speed.
-//  NOT FITTED YET. With this at 0 the 'h' and 'H' commands decline instead of
-//  driving off to look for a switch that is not there, and no crossing is
-//  watched for. Setting the encoder zero is then a manual step -- see the
-//  README -- and there is nothing that can tell you the magnet has slipped,
-//  which is the capability this switch exists to provide.
+//  WHAT IS LOST WITHOUT IT, precisely: nothing about RELATIVE angle. The
+//  encoder still reads the boom continuously and absolutely, to 0.0879 deg,
+//  and "move 3 degrees" still means three degrees. What is arbitrary is only
+//  the LABEL on the scale -- 0.0 means wherever the boom was when 'z' was
+//  typed. Pointing at a geostationary bird needs only the relative part.
 #define USE_REF_SWITCH 0
 
-// Roughly where the switch sits. Only used to plan the deliberate pass; the
-// stored raw counts are what is actually believed. Put it off the angle the
-// dish normally parks at, so the boom is never left resting on the lever.
-const float REF_ANGLE_DEG  = -5.0f;    // PLACEHOLDER
+// Only read when USE_REF_SWITCH is 1. Kept so the branch still compiles and
+// so the numbers are not lost if a reason to fit the switch ever appears.
+const float REF_ANGLE_DEG  = -5.0f;    // PLACEHOLDER  where the switch sits
 const float REF_MARGIN_DEG =  1.5f;    // how far clear of it a pass starts
 
-// The deliberate pass crosses slowly, because the capture is polled at the
-// loop rate: at 50 Hz and this duty the boom moves far less than one encoder
-// count between polls, so the latency costs nothing measurable.
 const uint8_t  REF_CROSS_SPEED = 70;   // must still be above breakaway
 const uint16_t REF_TIMEOUT_MS  = 30000;
 
-// Raw counts seen at the entering edge, per direction. -1 = never adopted.
-const int16_t REF_RAW_POS_DEFAULT = -1;   // captured while moving positive
-const int16_t REF_RAW_NEG_DEFAULT = -1;   // captured while moving negative
+// Raw counts at the entering edge, per direction. -1 = never adopted. Two of
+// them because a microswitch's trip and release points differ, so a crossing
+// is only repeatable per direction; their difference is the lobe width plus
+// hysteresis, which is its own diagnostic.
+const int16_t REF_RAW_POS_DEFAULT = -1;
+const int16_t REF_RAW_NEG_DEFAULT = -1;
 
-// Passive crossings during ordinary moves are compared against the stored
-// reference and reported above this. Set it above the switch's own
-// repeatability or every move will cry wolf.
-const float REF_DRIFT_WARN_DEG = 0.5f;    // PLACEHOLDER -- measure the switch
+const float REF_DRIFT_WARN_DEG = 0.5f;  // PLACEHOLDER -- measure the switch
 
 // ===========================================================================
 //  5. HEALTH  --  what the reed is for now

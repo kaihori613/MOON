@@ -66,6 +66,30 @@ measuring.** The result holds while the sweep stays inside the main lobe, which
 it does over ±9° on a beam this wide; a sweep reaching sidelobes would need the
 fit narrowed, because a parabola stops describing the pattern out there.
 
+### Checking that the aim is still good
+
+`check_pointing()` is the reference switch, done in software. Calibration
+records what the metric read at the peak; the check compares against it and
+reports one of `ok`, `improved`, `degraded`, `failed` or `no-signal`. It never
+moves anything — the caller decides what to do.
+
+The threshold is `max(fixed, 3σ)`, where σ combines the noise on the reference
+and on the current reading. That is the same principle as the reed's debounce
+and the moment estimator's significance gate, and it exists because a system
+that reacts to its own measurement noise will re-peak a perfectly good dish on
+a windy afternoon and store whatever it happens to find. Tested against 200
+samples of a healthy but noisy link: zero false re-peaks, while a genuine 9 dB
+drop on that same link was still caught.
+
+Given a beamwidth it also reports how much pointing error would explain the
+drop, by inverting the loss law. A 3 dB drop on a 12° beam comes back as 6.0° —
+exactly the half-power point, which is the sanity check on the arithmetic. The
+number tells you whether re-peaking could plausibly recover this or whether it
+is far too large for any error the mount can even reach.
+
+`improved` is reported rather than swallowed: it usually means the reference
+was taken in worse conditions than these and is not the standard to hold to.
+
 ### Failure is non-destructive
 
 No usable reading anywhere, or a best reading at the edge of the swept range,

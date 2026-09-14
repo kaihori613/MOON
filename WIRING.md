@@ -157,72 +157,54 @@ round they go depends on how the motor happens to be wired, and one fitted
 backwards traps you at exactly the limit it was meant to let you escape. Drive
 onto each cam slowly and confirm you can still drive off it.
 
-## The reference switch
+## The reference switch — designed, probably not needed
 
-**Not fitted yet.** `USE_REF_SWITCH` is `0`, so `h` and `H` decline rather
-than driving off to look for a switch that is not there, and no crossing is
-watched for. Until it exists the encoder zero is set by hand and then simply
-trusted — see the README for that procedure, and note what it costs: nothing
-in the system can tell you the magnet has slipped on its hub.
+`USE_REF_SWITCH` is `0`, and the honest recommendation is to leave it there.
 
-A **third** switch, mid-travel, on D10. It is deliberately not one of the cams.
+The case for it was that the encoder's zero can creep with no symptom: zero is
+a raw count in EEPROM, and a magnet slipping on its hub makes every angle wrong
+by a constant. The first half is true. **"No symptom" is not.**
 
-### Why not reuse a limit switch
+**The satellite is a reference** — continuously available and far more
+sensitive than any microswitch. If the zero drifts, the metric at the aimed
+angle falls, and you are watching the receiver anyway. Better still, the drift
+repairs itself: a calibration run does not care what "zero" means, it finds the
+encoder reading with the best signal and stores *that*, so a shifted zero is
+absorbed into the next run.
 
-It is tempting — no extra part, no extra pin — and it is wrong:
+What the switch adds over that is the ability to tell **"the mount moved"**
+from **"the sensor moved."** Both look like "signal is worse than it was," and
+for *recovery* the distinction is irrelevant — you re-peak either way. That is
+a diagnostic convenience costing a switch, a pin, a cam lobe, outdoor wiring
+and one more thing to fail on a mast.
 
-- **The cams are hard stops.** They protect the antenna and normal operation
-  must never reach them. Homing into one drives deliberately into a safety
-  device, wearing the switch and, worse, the cam-to-lever alignment that *is*
-  the protection.
-- **It destroys the alarm.** If "SW− is tripped" also means "we are homing",
-  a genuine runaway looks like a routine procedure.
-- **The escape diodes make it violent.** Current is cut the instant the cam
-  opens, so every home ends with the mechanism hard-cut by a safety circuit
-  rather than decelerating under control. Twice per home, forever.
+`host/peak.py`'s `check_pointing()` does the detecting instead, and catches a
+shifted mount, a slipped magnet, a wet LNA and a failing feed in one test.
 
-The reference switch carries no safety duty and is wired only to its pin —
-nothing it does interrupts motor current — so crossing it is free.
+A reference switch **would** earn its place on a system that cannot verify
+against its payload — a telescope that only observes at night, a machine tool
+where a bad zero ruins the work before anyone notices. None of that is this.
 
-### What it is for
+The firmware branch stays, guarded and compiling, because it costs nothing at
+`0`. Fit the switch only if a reason appears that the signal cannot cover.
 
-The encoder is absolute, but **its zero is not**. Zero is a raw count in
-EEPROM, and nothing in the encoder can reveal that the magnet has crept on its
-hub or that the EEPROM was wiped. Every angle would be wrong by a constant,
-confidently, with no symptom. This switch is the physical fact you check it
-against.
+### What is actually lost, precisely
 
-Being mid-travel turns that from a procedure into **passive monitoring**: the
-boom crosses the switch during ordinary moves, so the firmware captures every
-crossing and compares it — no homing cycle to remember to run. It prints a
-warning only when the drift exceeds `REF_DRIFT_WARN_DEG`.
+**Nothing about relative angle.** The encoder still reads the boom
+continuously and absolutely, to 0.0879°. "Move 3°" still means three degrees,
+and the sweep still knows the exact angle of every sample it takes.
 
-- `h` — deliberate slow pass across the switch in both directions, report
-  drift and change nothing
-- `H` — the same, but adopt the crossings and re-derive zero
+| | Known? |
+|---|---|
+| Relative angle — "the peak is 2.1° right of here" | **Always** |
+| True compass heading — "the boom is at 218.7° azimuth" | Only if zero was calibrated against something external |
 
-### Two references, one per direction
+What is arbitrary is the *label* on the scale: `0.0°` means wherever the boom
+was when you typed `z`. Pointing at a geostationary bird needs only the
+relative part, which is why this is a small loss.
 
-A microswitch's trip and release points differ, so a crossing is only
-repeatable **per direction**. Crossing while moving positive and crossing
-while moving negative are two different, individually stable numbers, and each
-is compared against its own stored reference.
-
-Their difference is the lobe width plus hysteresis — a constant of the
-mechanism, and a free diagnostic in its own right. If it changes, the lever is
-bending or the cam has worked loose, which neither crossing alone would show.
-
-Zero is derived from the **midpoint** of the two, which cancels the hysteresis
-instead of inheriting whichever direction happened to be captured.
-
-### Placing it
-
-Put it where the boom passes through but never parks — `REF_ANGLE_DEG`
-defaults to −5°. A switch at the normal operating angle would be rested on,
-and a lever sitting at its own trip point chatters and reads ambiguously.
-
-Both crossings are taken on the **inactive→active** edge, so the cam lobe only
-has to be entered, never traversed at a known speed.
+To put a real heading on the scale without a switch: sight the boom against a
+known bearing, then `z` and `w`.
 
 ## Hard stops
 
