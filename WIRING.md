@@ -134,9 +134,9 @@ with no way back. Put both switches in series in one motor lead, each bypassed
 by a power diode, with the diodes facing opposite ways:
 
 ```
-  DRIVER M1 ──┬── SW+ ──┬──┬── SW− ──┬────── MOTOR ────── DRIVER M2
-              └── D+ ───┘  └── D− ───┘
-                  →            ←
+  L298N OUT1+3 ──┬── SW+ ──┬──┬── SW− ──┬──── MOTOR ──── L298N OUT2+4
+                 └── D+ ───┘  └── D− ───┘
+                     →            ←
 ```
 
 - Neither tripped → both switches closed, no drop, no diode current
