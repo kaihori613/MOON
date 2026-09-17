@@ -124,6 +124,40 @@ measures is time, which is enough for breakaway duty, stroke duration each way
 and coast after stop, and none of which needs the sensor. Pulses against
 distance is `reed_switch_test/`'s job.
 
+### `as5600_test/`
+
+Bring-up and characterisation for an AS5600 12-bit magnetic encoder — 4096
+counts per revolution, 0.0879° per count, absolute, and **readable while
+moving**, which is the one thing the accelerometer structurally cannot do.
+
+Same shape as `reed_switch_test/`: it produces numbers, not a green light.
+
+`m` is the important one. The AS5600 reports its own gain (AGC), and gain is a
+proxy for air gap — high means the field is weak, low means it is too strong.
+So the gap gets **set while watching a live bar** rather than measured with a
+ruler and hoped for. `n` gives the noise floor in LSB and degrees; `a` gives
+sigma against sample count, which is the only honest way to pick how many
+samples are worth averaging; `w` logs drift as CSV over minutes, where thermal
+movement and a bracket relaxing both show up and a ten-second run cannot see
+them.
+
+Everything works in **unwrapped** counts. The encoder rolls 4095 → 0, and over
+a ±15° arc you will probably never cross it — but "probably never" is how a
+coordinate system ends up jumping 360° in the middle of a measurement.
+
+The magnet must be **diametrically magnetised**, poles across the diameter and
+not through the thickness. A through-thickness magnet does not fail loudly: the
+number still moves, just not linearly with angle. `s` reads the MD/ML/MH status
+bits, which is the fastest way to know before trusting anything downstream. It
+also reports ZMCO — non-zero means someone has burned settings into the part's
+OTP permanently, in which case `ANGLE` is a scaled view of a range somebody
+else chose and `RAW_ANGLE` is the one to use.
+
+Address 0x36, fixed in silicon, so only one per bus without a mux. It clashes
+with nothing else here: FXOS8700 at 0x1F, LCD at 0x27, MPU-9150 at 0x68.
+
+Not run on hardware. The register map is from the datasheet.
+
 ### `actuator_v1/`
 
 The bring-up sketches with the loop closed around them. The motor code is
