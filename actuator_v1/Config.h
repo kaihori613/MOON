@@ -210,7 +210,27 @@ const uint16_t IMU_SWEEP_SETTLE_MS   = 1200;
 //
 //  BUZZER_GROUND_PIN is held permanently LOW so an active buzzer plugs into
 //  two adjacent headers with no flying ground lead. Set it to -1 if you would
-//  rather wire ground properly.
+//  rather wire ground properly -- which is the case here: D4 is a switch on
+//  the real board, and an output pin held LOW against a switch that can reach
+//  +5V is a short through the AVR.
 #define USE_BUZZER 1
-const uint8_t PIN_BUZZER        = 7;
-#define BUZZER_GROUND_PIN 4
+const uint8_t PIN_BUZZER        = 11;
+#define BUZZER_GROUND_PIN (-1)
+
+// ===========================================================================
+//  13. KILL SWITCH
+// ===========================================================================
+//  A manual stop, read as an input. NORMALLY CLOSED to ground with a pull-up:
+//  pressed, or a cut wire, or a failed contact all read HIGH, and all of them
+//  stop the motor. The safe failure is a dish that will not move.
+//
+//  WORTH BEING HONEST ABOUT WHAT THIS IS. If the switch only tells the
+//  firmware, it is a STOP BUTTON -- it works exactly as well as the firmware
+//  does, and not at all when the firmware is wedged in a loop. A real kill
+//  switch breaks the motor supply itself, and this input exists so the
+//  firmware knows that happened rather than as the thing that makes it
+//  happen. Wire it in the motor supply AND to this pin; use the pin alone
+//  only knowingly.
+#define USE_KILL_SWITCH 1
+const uint8_t PIN_KILL = 7;
+const bool KILL_ACTIVE_HIGH = true;   // NC + pull-up: open (HIGH) = killed
