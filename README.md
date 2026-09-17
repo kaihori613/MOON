@@ -16,7 +16,7 @@ is the first sketch here that does; that part has not been on hardware yet.
 | `reed_switch_test/` | **Run on hardware, sensor is clean.** The timed run added since is unrun |
 | `l298n_test/`, `actuator_test/` | **Bring-up. The motor turned.** Superseded by `actuator_v1/` |
 | `actuator_v1/` | **Compiles clean, 63% flash / 17% RAM on a 328P. Never run.** |
-| `actuator_v1/` IMU + buzzer | **Written, never compiled.** No `arduino-cli` on the machine it was written on |
+| `actuator_v1/` IMU + buzzer | **Syntax-clean in all 64 config permutations.** Never run |
 | Host yaw pointing | **`test_geometry.py` now passes, 21/21.** The serial path is still unrun |
 | Host axis fit | **`test_axis_fit.py` passes, 24/24**, and the CLI runs end to end on synthetic sweeps |
 
@@ -373,6 +373,24 @@ rather than a stall against a mechanical stop.
 
 What it does *not* establish is where they cut, or whether they cut in the same
 place twice — see the open issue below.
+
+## Checking it compiles without the IDE
+
+```bash
+./tools/syntax_check.sh            # one build of each sketch
+./tools/syntax_check.sh --matrix   # plus all 64 actuator_v1 config permutations
+```
+
+Host `g++` against stub headers in `tools/arduino_stub/`. Not a simulator and
+not an AVR build: no flash figures, nothing executes. What it catches is
+everything wrong before anything is plugged in — typos, missing declarations,
+wrong argument types, and `#ifdef` branches nobody has ever built. On a project
+where most sketches have never been compiled by anything, that is most of what
+a compiler was going to tell you anyway.
+
+The matrix matters more than it sounds. Half the config permutations here had
+never been built in any form, and a `#if USE_LCD` branch that does not compile
+is invisible until the day you turn it on.
 
 ## Configuration
 
