@@ -59,6 +59,22 @@ should be running right now.
    section *Session 2*.
 5. **Walk the breakaway bracket.**
 
+### Now on the bench — AS5600 encoder and limit switches (from 18 Sep 2026)
+
+| Sketch | Use |
+|---|---|
+| `as5600_bench/` | **the working copy — edit this one.** Starts as `as5600_simple`. |
+| `as5600_simple/` | run first: 9600 baud, no commands, bus scan, explains a silent bus |
+| `as5600_characterise/` | air gap (AGC), noise floor, averaging depth, drift — numbers for Config.h |
+| `as5600_test/` | magnet check, count direction, wrap check for `actuator_v2` |
+| `archive/cam_switch_test/` | the old cam end-stop repeatability test, restored from history |
+
+`actuator_v2/` (closed loop on the pivot via the AS5600, cam microswitches at
+±15°) and [WIRING.md](WIRING.md) came in with it; its README is kept whole at
+[docs/actuator-v2-readme.md](docs/actuator-v2-readme.md). **WIRING.md
+describes v2's panel pins, not the bench's** — the bench is still buttons on
+D3/D4 and kill on D7, per `actuator_v1/Config.h`.
+
 ### The three documents that matter
 
 | | |
@@ -247,8 +263,10 @@ absence of an interpreter had been blocking the cheapest tests in the repo.
 `l298n_test/` and `actuator_test/` — bring-up sketches. The motor turned. Both
 are superseded by `actuator_v1/` and kept only as history.
 
-Two earlier sketches, `actuator_system/` and `cam_switch_test/`, were deleted
-outright and now have to be recovered from git history. That has been regretted
+`cam_switch_test/` was deleted once and restored here on 18 Sep 2026.
+
+`actuator_system/` was deleted outright and has to be recovered from git
+history. That has been regretted
 twice. Nothing else gets deleted here — it gets archived.
 
 ## Testing strategy
