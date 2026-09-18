@@ -1074,7 +1074,9 @@ void setup() {
   Serial.println(F("MOON actuator_v2 -- Rev B"));
 
   Wire.begin();
-  Wire.setClock(400000);
+  // 100 kHz: the BSS138 shifter's 10k pull-ups make edges too slow for 400.
+  // A 2-byte angle read still takes well under 1 ms of a 20 ms tick.
+  Wire.setClock(100000);
 
   loadSettings();
 

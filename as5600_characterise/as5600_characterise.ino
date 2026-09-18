@@ -50,7 +50,7 @@ const uint8_t AS5600_ADDR = 0x36;
 
 // Sets what a healthy AGC looks like: the part's gain range is 0-255 at 5 V
 // and only 0-128 at 3.3 V, so the target midpoint halves with the supply.
-#define AS5600_SUPPLY_5V 1
+#define AS5600_SUPPLY_5V 0   // WIRING.md: 3.3 V behind the shifter; 1 if wired to 5 V
 
 #if AS5600_SUPPLY_5V
   const uint8_t AGC_MAX = 255;

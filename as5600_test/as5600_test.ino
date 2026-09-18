@@ -34,6 +34,17 @@ const float DEG_PER_COUNT = 360.0f / (float)COUNTS;
 
 const uint16_t PRINT_MS = 200;
 
+// What a healthy AGC looks like depends on the supply: the gain range is
+// 0-255 at 5 V and only 0-128 at 3.3 V. WIRING.md runs the part at 3.3 V
+// behind the level shifter; set this to 1 if yours is wired straight to 5 V.
+#define AS5600_SUPPLY_5V 0
+
+#if AS5600_SUPPLY_5V
+  const uint8_t AGC_MAX = 255;
+#else
+  const uint8_t AGC_MAX = 128;
+#endif
+
 static uint16_t g_min = 0xFFFF;
 static uint16_t g_max = 0;
 static bool     g_sweeping = false;
@@ -89,12 +100,16 @@ void reportMagnet() {
   else if (st & 0x08)    Serial.print(F("TOO STRONG -- move away"));
   else                   Serial.print(F("ok"));
 
-  // AGC runs 0-255 on a 5 V part. Mid-scale is the target: pinned at either
-  // end means the gap is at the edge of what the part can compensate for,
-  // and it will fall out of range with temperature.
+  // Mid-scale is the target: pinned at either end means the gap is at the
+  // edge of what the part can compensate for, and it will fall out of range
+  // with temperature.
   Serial.print(F("   agc="));
   Serial.print(agc);
-  if (agc < 32 || agc > 224) Serial.print(F("  <-- near the end of its range"));
+  Serial.print('/');
+  Serial.print(AGC_MAX);
+  if (agc < AGC_MAX / 8 || agc > AGC_MAX - AGC_MAX / 8) {
+    Serial.print(F("  <-- near the end of its range"));
+  }
   Serial.println();
 }
 
@@ -110,7 +125,11 @@ void setup() {
   Serial.begin(115200);
   Serial.println(F("as5600_test -- encoder bring-up, no motor code here"));
   Wire.begin();
-  Wire.setClock(400000);
+  // 100 kHz, not 400. Through a BSS138 shifter with 10k pull-ups the edges
+  // are too slow for 400 kHz, and the symptom is reads that fail or come back
+  // as junk -- which looks exactly like a bad sensor. Nothing here needs the
+  // speed: a read takes under a millisecond either way.
+  Wire.setClock(100000);
 
   uint16_t raw;
   if (!readAngle(&raw)) {
@@ -143,7 +162,12 @@ void loop() {
         Serial.println(F(" deg"));
         Serial.print(F("suggested ENCODER_ZERO_DEFAULT = "));
         Serial.println((uint16_t)(((long)g_min + (long)g_min + span) / 2) & 0x0FFF);
-        if (g_min < 200 || g_max > (COUNTS - 200)) {
+        // g_min and g_max are the ends of the swept arc, found wrap-safely,
+        // so an arc that crosses 0 has its "min" numerically ABOVE its "max".
+        if (g_max < g_min) {
+          Serial.println(F("WARNING: the travel CROSSES the 0/4095 wrap."));
+          Serial.println(F("Rotate the magnet on its hub so travel centres near 2048."));
+        } else if (g_min < 200 || g_max > (COUNTS - 200)) {
           Serial.println(F("WARNING: range sits near the 0/4095 wrap."));
           Serial.println(F("Rotate the magnet on its hub so travel centres near 2048."));
         }
@@ -181,5 +205,12 @@ void loop() {
     Serial.println();
     g_last = raw;
     g_havePrev = true;
+  } else {
+    // Outside a sweep, stream the angle anyway. A sketch that goes quiet
+    // after one line is indistinguishable from one that has hung.
+    Serial.print(F("raw=")); Serial.print(raw);
+    Serial.print(F("  deg=")); printDeg(raw * DEG_PER_COUNT);
+    Serial.print(F("  "));
+    reportMagnet();
   }
 }
