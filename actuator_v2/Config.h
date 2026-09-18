@@ -116,14 +116,19 @@ const uint8_t PIN_CS = A3;
 // section 5. Nothing here integrates it.
 const uint8_t PIN_REED = 2;
 
-// Limit cams at the pivot -- "limit switch 1" on A0, "limit switch 2" on A1.
-// NC to GND with INPUT_PULLUP, so a broken wire reads as TRIPPED rather than
-// as permission to keep going. These also cut motor current in hardware; the
-// pins only tell the firmware what the wiring has already done.
+// Limit switches at the pivot -- "limit switch 1" on A0, "limit switch 2" on
+// A1. SIGNAL ONLY: they do not cut motor current, so stopping at +/-15 deg is
+// this firmware's job, backed only by the actuator's own internal cams.
 //
-// POS is the cam the boom reaches while EXTENDING. Check it before any powered
-// move: trip each cam by hand and watch 'lim=' in 's' -- the + must light for
-// the extend-side cam. If it is the other way round, swap these two numbers.
+// LIMITS_NORMALLY_CLOSED 1 is for a microswitch wired COM-NC to GND: a broken
+// wire then reads as TRIPPED rather than as permission to keep going. Set it
+// to 0 if they are wired COM-NO, and know that a broken wire then silently
+// removes that limit.
+#define LIMITS_NORMALLY_CLOSED 1
+//
+// POS is the switch the boom reaches while EXTENDING. Check it before any
+// powered move: trip each by hand and watch 'lim=' in 's' -- the + must light
+// for the extend-side switch. If it is the other way round, swap these two.
 const uint8_t PIN_LIM_POS = A0;
 const uint8_t PIN_LIM_NEG = A1;
 
@@ -140,18 +145,19 @@ const uint8_t PIN_BTN_RETRACT = 4;
 const uint8_t PIN_BTN_STOP    = A3;     // only read when USE_STOP_BUTTON is 1
 const uint8_t PIN_BUZZER      = 11;
 
-// KILL SWITCH on D7, the pin v1 uses. It is a latching fault: the motor stops
-// on the first sample, and 'k' refuses to clear it while the switch is still
-// thrown. It is still only a request to the firmware -- it cannot stop a
-// shorted bridge -- so the E-stop's other pole must break the +25 V line.
+// KILL BUTTON on D7: a normally-open push button to GND, the same as
+// reed_switch_test and v1. It is a latching fault: the motor stops on the
+// first sample and stays stopped after the button is let go -- release it,
+// then 'k'. 'k' refuses while it is still held.
 //
-// Set KILL_IS_NORMALLY_CLOSED to 1 for an NC contact held closed to GND,
-// which is what WIRING.md draws: a broken wire or a pulled connector reads as
-// KILLED. Set it to 0 for a common normally-open button between D7 and GND.
-// Get it backwards and the sketch boots killed, which is the safe way round.
+// It is only a request to the firmware and cannot stop a shorted bridge, so
+// keep a hardware way to cut the 25 V within reach.
+//
+// Set KILL_IS_NORMALLY_CLOSED to 1 only if it is ever swapped for an NC
+// contact held closed to GND. Get it backwards and the sketch boots killed.
 const uint8_t PIN_KILL = 7;
 #define USE_KILL                1
-#define KILL_IS_NORMALLY_CLOSED 1
+#define KILL_IS_NORMALLY_CLOSED 0
 
 // MANUAL MODE. Hold-to-run: released is stopped, that instant. A serial
 // console has no key-up event, which is why the bring-up sketches jogged on a
@@ -260,13 +266,15 @@ const uint8_t SPEED_BUTTON = SPEED_SLOW;
 // ===========================================================================
 //  Three layers, outermost last:
 //    1. soft limit here, in firmware, from the encoder
-//    2. the cam microswitches at +/-15 deg, which cut current in hardware
-//    3. the actuator's own internal cams at the ends of the stroke
+//    2. the limit switches at +/-15 deg -- signal only, so the firmware
+//       stops the motor when one trips; they cut nothing themselves
+//    3. the actuator's own internal cams at the ends of the stroke, the
+//       only layer that cuts motor current in hardware
 //
-//  Keep the soft limit inside the cams so normal operation never reaches
-//  them; a cam trip should mean something went wrong, not "Tuesday". Two
+//  Keep the soft limit inside the switches so normal operation never reaches
+//  them; a limit trip should mean something went wrong, not "Tuesday". Two
 //  degrees of margin covers coast plus backlash with room to spare.
-const float HARD_STOP_DEG  = 15.0f;   // where the cams physically are
+const float HARD_STOP_DEG  = 15.0f;   // where the limit switches physically are
 const float SOFT_LIMIT_DEG = 13.0f;   // where the firmware refuses to go
 
 // ===========================================================================

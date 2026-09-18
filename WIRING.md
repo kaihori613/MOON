@@ -2,8 +2,8 @@
 
 The hardware `actuator_v2/` expects. One brushed DC linear actuator on one
 H-bridge, positioned against an **absolute encoder on the yaw pivot**, with
-the reed switch kept as a health witness and travel bounded by cam switches
-that cut motor current in hardware.
+the reed switch kept as a health witness and travel bounded by ±15° limit
+switches that the firmware reads, backed by the actuator's own internal cams.
 
 **Nothing on this page has been built.** Rev A — the reed-counting design —
 is still in git history and `actuator_v1/` still runs it.
@@ -17,7 +17,7 @@ is still in git history and `actuator_v1/` still runs it.
 | Bridge | L298N | still the L298N on the bench; `MOTOR_DRIVER` selects the G2 when it arrives |
 | Reed | the position sensor | motion witness only |
 | IMU | MPU6050 planned | dropped |
-| Limits | actuator's internal cams only | cams at ±15° that cut current, plus the actuator's own |
+| Limits | actuator's internal cams only | ±15° limit switches read by the firmware, plus the actuator's own cams |
 
 Three things drove it. The reed had no direction and sat on the motor side of
 the leadscrew backlash, so it measured the wrong quantity in the wrong place.
@@ -30,16 +30,16 @@ L298N is a 2 A part with a 2–3 V drop being asked to run a jack at 25 V.
 |---|---|---|
 | D0, D1 | USB serial | Console, and the target-angle channel from the host |
 | D2 | Reed switch | **INT0.** Health witness — nothing integrates it any more |
-| D3 | Extend button | NO to GND. Same pin as v1 and `reed_switch_test` |
-| D4 | Retract button | NO to GND. Same pin as v1 and `reed_switch_test` |
+| D3 | Extend button | Push button, NO to GND. Same pin as v1 and `reed_switch_test` |
+| D4 | Retract button | Push button, NO to GND. Same pin as v1 and `reed_switch_test` |
 | D5 · D6 · D9 | L298N channel A — **dead** | Held LOW from the first line of `setup()`. OUT1/OUT2 stay unconnected |
-| D7 | **Kill switch** | E-stop pole 2, NC to GND |
+| D7 | **Kill button** | Push button, NO to GND. Latches; release, then `k` |
 | D8 | L298N **IN3** | `digitalWrite` only, never PWM |
 | D10 | L298N **ENB** | PWM, Timer1 |
 | D11 | Buzzer | Via a transistor |
 | D12 | L298N **IN4** | `digitalWrite` only, never PWM |
-| A0 | Limit switch 1, +15° | Cam pole B, NC to GND. The cam reached while **extending** — check it, see below |
-| A1 | Limit switch 2, −15° | Cam pole B, NC to GND |
+| A0 | Limit switch 1, +15° | Microswitch COM–NC to GND, signal only. The one reached while **extending** — check it, see below |
+| A1 | Limit switch 2, −15° | Microswitch COM–NC to GND, signal only |
 | A2 | **Home (reference) switch** | Mid-travel, NO to GND. Not a stop — see below. `USE_REF_SWITCH 1` |
 | A3 | free | The G2's current sense if that driver is ever fitted |
 | A4 | I2C SDA | AS5600 at 0x36, through a level shifter |
@@ -50,12 +50,12 @@ Every switch input uses the filter in *Switch inputs* below, and
 `INPUT_PULLUP` stays on as well. There is no separate stop button; the kill
 switch stops everything. `USE_STOP_BUTTON` puts one on A3 if it is ever added.
 
-**Check which cam is which before any powered move.** Trip each cam by hand
-and send `s`: the extend-side cam must light the `+` in `lim=`. If it lights
-the `-`, swap `PIN_LIM_POS` and `PIN_LIM_NEG` in `Config.h`. Swapped, the
-firmware blocks the direction that escapes a cam and allows the one that
-drives further in — the hardware contact still cuts the motor, but the
-firmware is then fighting it.
+**Check which limit is which before any powered move.** Trip each limit
+switch by hand and send `s`: the extend-side switch must light the `+` in
+`lim=`. If it lights the `-`, swap `PIN_LIM_POS` and `PIN_LIM_NEG` in
+`Config.h`. Swapped, the firmware blocks the direction that escapes a limit
+and allows the one that drives further in — and nothing else stops it short
+of the actuator's internal cams.
 
 **I2C is A4/A5 and cannot be moved.** `Wire` on a 328P is tied to that
 peripheral. An encoder on any other pin will not enumerate.
@@ -142,56 +142,32 @@ up to 3.3 V. Don't run it direct and rely on it working on the bench.
 
 ## Travel limits
 
-Three layers, and they are deliberately not redundant with each other:
+Three layers:
 
 1. **Soft limit**, ±13° in `Config.h`, refused before a move starts
-2. **Cam microswitches** at ±15° on the pivot, which cut motor current
-3. **The actuator's own internal cams** at the ends of the stroke
+2. **Limit switches** at ±15° on the pivot, on A0 and A1. Signal only: they
+   tell the firmware, which stops the motor and refuses to drive further in
+3. **The actuator's own internal cams** at the ends of the stroke, which cut
+   motor current inside the housing and have their own bypass diodes
 
-Normal operation should never reach layer 2. A cam trip means something went
-wrong, not "Tuesday".
+Normal operation should never reach layer 2. A limit trip means something
+went wrong, not "Tuesday".
 
-**Put the cams on the pivot, not on the rod.** ±15° of boom is not a fixed
+**The ±15° switches do not cut motor current.** They carry only the pin's
+signal, so stopping at ±15° depends on the firmware running. If the sketch
+hangs or the bridge fails on, nothing stops the boom until the actuator's
+internal cams at the end of the stroke. That is the reason for a hardware way
+to cut the 25 V (see *Kill switch*).
+
+**Microswitch contacts: use COM and NC.** Wired NC to GND, a broken wire
+reads as a tripped limit rather than as permission to keep going. That is what
+`LIMITS_NORMALLY_CLOSED 1` expects. With COM and NO instead, set it to 0 —
+it works, but a broken wire then silently removes that limit.
+
+**Put the switches on the pivot, not on the rod.** ±15° of boom is not a fixed
 amount of rod travel — the linkage is a triangle, so the ratio changes along
-the stroke. Cams on the pivot measure the angle directly and stay correct
-everywhere; cams on the rod would only be right at one extension.
-
-### The escape diodes
-
-A switch that simply opens the motor circuit leaves you stuck at the limit
-with no way back. Put both switches in series in one motor lead, each bypassed
-by a power diode, with the diodes facing opposite ways:
-
-```
-  L298N OUT3 ────┬── SW+ ──┬──┬── SW− ──┬──── MOTOR ──── L298N OUT4
-                 └── D+ ───┘  └── D− ───┘
-                     →            ←
-```
-
-- Neither tripped → both switches closed, no drop, no diode current
-- `SW+` open → only the direction `D+` passes still flows. You can drive off
-- `SW−` open → likewise, the other way
-- Both open → the mechanism is past both cams. Investigate, do not power
-
-Use **normally-closed** contacts so a broken wire reads as a tripped limit
-rather than as permission to keep going.
-
-**Each cam needs two contacts** — a DPDT microswitch, or two switches on one
-lobe. Pole A is the NC contact in the motor lead above. Pole B is a second NC
-contact from A0 (+15°) or A1 (−15°) to GND, so the firmware knows which cam
-tripped. One SPDT cannot do both: its spare contact is NO, and a broken wire
-on an NO flag reads as "not at the limit". Pole A breaks full motor current at
-25 V DC, so check the switch's **DC** rating, not the AC figure on its body.
-
-Size the diodes for **full motor current** — they carry it whenever you are
-driving off a limit — so a 15 A, 45 V Schottky on a small heatsink, not a
-1N4007. At a few amps and ~0.5 V the escape path dissipates a couple of watts,
-which is fine briefly and not fine continuously.
-
-**Check each diode's orientation on the bench before trusting it.** Which way
-round they go depends on how the motor happens to be wired, and one fitted
-backwards traps you at exactly the limit it was meant to let you escape. Drive
-onto each cam slowly and confirm you can still drive off it.
+the stroke. Switches on the pivot measure the angle directly and stay correct
+everywhere; switches on the rod would only be right at one extension.
 
 ## The reference switch — designed, probably not needed
 
@@ -251,28 +227,25 @@ known bearing, then `z` and `w`.
 
 ## Hard stops
 
-The ±15° cams are now purely protective. `actuator_v2` treats driving into one
-as a **fault**, not a waypoint: the soft limit at ±13° should have stopped the
-move first, so reaching a cam means something went wrong. Clear it with `k`
-and jog away — the firmware blocks the direction that would go further in and
-allows the one that escapes.
+The ±15° limit switches are purely protective. `actuator_v2` treats driving
+into one as a **fault**, not a waypoint: the soft limit at ±13° should have
+stopped the move first, so reaching a limit means something went wrong. Clear
+it with `k` and jog away — the firmware blocks the direction that would go
+further in and allows the one that escapes.
 
 ## Kill switch
 
-A latching E-stop with **two NC poles**:
+A **push button**, normally open, from D7 to GND — the same as
+`reed_switch_test` (`KILL_IS_NORMALLY_CLOSED 0`). Pressing it latches the
+`kill` fault: the motor stops on the first sample and stays stopped after you
+let go. Release it, then send `k`. `k` refuses while the button is still held,
+and booting with it held boots into the fault.
 
-- **Pole 1 in the +25 V line**, between the supply and C1/the driver's VS.
-  This is the part that actually stops the motor. Rate it for the motor's DC
-  current, like the cam contacts.
-- **Pole 2 from D7 to GND**, so the firmware knows. With
-  `KILL_IS_NORMALLY_CLOSED 1` a thrown switch or a broken wire reads HIGH and
-  latches the `kill` fault. `k` refuses to clear it while the switch is still
-  thrown, and booting with it thrown boots into the fault.
-
-Pole 2 alone is not a kill switch. It asks the firmware to call `motorOff()`,
+It is a request to the firmware, not a power cut. It asks for `motorOff()`,
 and a shorted bridge does not listen — that is exactly how channel A failed.
-For a plain normally-open button on D7 instead, set `KILL_IS_NORMALLY_CLOSED`
-to 0.
+Keep a hardware way to cut the 25 V within reach while the motor can move:
+the supply's output switch, or a switch in the +25 V lead rated for the
+motor's DC current.
 
 ## Power
 
@@ -345,15 +318,15 @@ to sit where the pin reads it:
 
 | Pin | Switch | Contact |
 |---|---|---|
-| D3 | Extend button | NO |
-| D4 | Retract button | NO |
-| D7 | Kill (E-stop pole 2) | NC |
-| A0 | Limit switch 1, +15° (cam pole B) | NC |
-| A1 | Limit switch 2, −15° (cam pole B) | NC |
+| D3 | Extend push button | NO |
+| D4 | Retract push button | NO |
+| D7 | Kill push button | NO |
+| A0 | Limit switch 1, +15° | NC (COM–NC) |
+| A1 | Limit switch 2, −15° | NC (COM–NC) |
 | A2 | Home (reference) switch | NO |
 
 Closed, the pin sits at about 0.2 V (5 V × 220 / 4920), a solid LOW. It falls
-in about 20 µs and rises in about 0.5 ms, so the kill switch and the cams
+in about 20 µs and rises in about 0.5 ms, so the kill button and the limits
 still act at once and the buttons' 25 ms debounce is untouched. The 220 Ω also
 limits the capacitor's discharge through the contacts and protects the pin
 from a spike on an outdoor wire. Return each switch to the **Arduino's** GND,
@@ -419,9 +392,10 @@ included. None of them blocks the loop. Set `USE_BUZZER` to 0 if nothing is fitt
    you.
 4. **Wire the two grounds to the supply negative separately.**
 5. **Fit C1 and C2 at the driver's supply terminals**, watching C1's polarity.
-6. **Limits and escape diodes**, then drive onto each cam by hand and confirm
-   you can drive off it. After this, nothing should reach a cam again in
-   normal use.
+6. **Limit switches.** Trip each by hand and check `lim=` in `s` (see the
+   pin map). Then jog slowly onto each one and confirm the firmware stops
+   there and still lets you jog back off. After this, nothing should reach a
+   limit again in normal use.
 7. **Fit the reference switch** somewhere the boom crosses but never parks,
    and run `H` to adopt it. Note the lobe+hysteresis figure it prints — that
    is the number `REF_DRIFT_WARN_DEG` has to sit above.

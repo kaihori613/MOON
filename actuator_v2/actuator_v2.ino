@@ -146,11 +146,17 @@ float positionDeg() {
 //  Limits
 // ---------------------------------------------------------------------------
 //  NC contacts to GND: LOW is the healthy, closed, not-at-a-limit state.
-//  A pulled-up HIGH means either the cam is tripped or the wire has broken,
-//  and both should stop travel in that direction.
+//  A pulled-up HIGH means either the switch is tripped or the wire has
+//  broken, and both should stop travel in that direction. Wired NO, it is
+//  the other way round, and a broken wire looks like "not at the limit".
 
+#if LIMITS_NORMALLY_CLOSED
 bool limitPos() { return digitalRead(PIN_LIM_POS) == HIGH; }
 bool limitNeg() { return digitalRead(PIN_LIM_NEG) == HIGH; }
+#else
+bool limitPos() { return digitalRead(PIN_LIM_POS) == LOW; }
+bool limitNeg() { return digitalRead(PIN_LIM_NEG) == LOW; }
+#endif
 
 // The reference switch carries no safety duty, so unlike the cams it is wired
 // only to this pin -- nothing it does interrupts motor current. Active LOW to
@@ -235,10 +241,10 @@ void motorOff() {
 void driveSigned(int duty) {
   duty = constrain(duty, -(int)SPEED_MAX, (int)SPEED_MAX);
 
-  // Hardware already blocks travel into a tripped cam; refusing here too
-  // means the firmware and the wiring agree rather than fighting. The flag
-  // lets the caller tell "we are escaping a cam" (fine) from "we drove into
-  // one" (a fault), which the duty alone cannot say once it has been zeroed.
+  // The +/-15 deg limit switches are signal only, so THIS is what stops travel
+  // into a tripped one -- nothing in the wiring does it for us. The flag lets
+  // the caller tell "we are escaping a limit" (fine) from "we drove into one"
+  // (a fault), which the duty alone cannot say once it has been zeroed.
   g_limitBlocked = false;
   if (limitPos() && duty > 0) { duty = 0; g_limitBlocked = true; }
   if (limitNeg() && duty < 0) { duty = 0; g_limitBlocked = true; }
