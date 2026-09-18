@@ -48,6 +48,8 @@
   #error "Set MOTOR_DRIVER to DRV_L298N or DRV_HW039"
 #endif
 
+// D2 is the only external interrupt the position loop can use. See WIRING.md
+// for the pull-up, series resistor and filter cap that go with it.
 const uint8_t PIN_REED = 2;
 
 // Measured on the bench, not guessed: 1 s of extend at duty 200 gave 250
