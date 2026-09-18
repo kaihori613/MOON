@@ -63,7 +63,7 @@ should be running right now.
 
 | Sketch | Use |
 |---|---|
-| `as5600_bench/` | **the working copy — edit this one.** Starts as `as5600_simple`. |
+| `as5600_bench/` | **the working copy — edit this one.** Now reads the angle two ways side by side, with magnet strength, for "the angle barely changes" |
 | `as5600_simple/` | run first: 9600 baud, no commands, bus scan, explains a silent bus |
 | `as5600_characterise/` | air gap (AGC), noise floor, averaging depth, drift — numbers for Config.h |
 | `as5600_test/` | magnet check, count direction, wrap check for `actuator_v2` |

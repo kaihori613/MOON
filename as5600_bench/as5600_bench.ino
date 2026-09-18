@@ -1,160 +1,138 @@
 // ===========================================================================
-//  as5600_bench  --  working copy of as5600_simple; edit this one
+//  as5600_bench  --  is it the code or the magnet?
 // ===========================================================================
 //
-//  Run this one FIRST. No commands, 9600 baud, prints on its own forever.
-//  Once it reads angles, move to as5600_characterise/ for the measurements that go
-//  into Config.h.
+//  For "the angle barely changes when I turn the magnet". 115200 baud, no
+//  commands, prints four times a second. Each line reads the angle TWO ways:
 //
-//  When the part does NOT answer, "no" is not a useful answer, so this
-//  reports three things instead:
+//    burst  one 2-byte read from 0x0C with a repeated start -- how
+//           as5600_simple, as5600_test and actuator_v2 read it
+//    split  0x0D then 0x0C as two separate 1-byte reads, each ending in a
+//           STOP -- how the OLED reference sketch reads it
 //
-//    1. The idle state of SDA and SCL, checked BEFORE the Wire library
-//       claims the pins. Both should sit HIGH, held there by pull-ups. A
-//       line stuck LOW is a short or a device jamming the bus, and no amount
-//       of software will talk over it.
-//    2. A full bus scan, repeated every two seconds. Nothing at 0x36 and
-//       nothing anywhere are different faults with different fixes, and
-//       re-scanning means you can wiggle a wire and watch it appear.
-//    3. The I2C error code, which distinguishes "nobody acknowledged that
-//       address" from "the bus itself is broken".
+//  plus what the chip says about the magnet. Turn the magnet one full turn,
+//  slowly, and read the result:
 //
-//  Wiring: VCC, GND, SDA->A4, SCL->A5. If your board brings DIR out and does
-//  not tie it, jumper DIR to GND.
+//    burst and split agree, span reaches ~360      everything works
+//    burst and split DISAGREE                      the read method matters --
+//                                                  report it, it is a code bug
+//    both agree, both barely move, and
+//      AGC is pinned near its maximum, or
+//      magnitude is small                          the field is too weak in the
+//                                                  chip's plane: wrong magnet
+//                                                  (axial, not diametric), too
+//                                                  far away, or off-centre
+//    both agree, both barely move, AGC and
+//      magnitude look healthy                      the magnet is not turning
+//                                                  relative to the chip
+//
+//  'span' is the widest arc seen since reset; send any character to reset it.
+//
+//  Wiring: VCC, GND, SDA->A4, SCL->A5, DIR->GND.
+
 #include <Wire.h>
-const uint8_t AS5600 = 0x36;      // fixed in silicon, not selectable
-bool     g_found = false;
-uint32_t g_nextScan = 0;
-// Before Wire.begin() takes the pins, look at them as plain inputs. With
-// pull-ups present and the bus idle, both float HIGH. This is the one check
-// that sees a hardware fault the I2C library can only report as silence.
-void checkIdleLevels() {
-  pinMode(A4, INPUT);
-  pinMode(A5, INPUT);
-  delay(5);
-  const bool sda = digitalRead(A4);
-  const bool scl = digitalRead(A5);
-  Serial.print(F("SDA (A4) idle: ")); Serial.println(sda ? F("HIGH") : F("LOW"));
-  Serial.print(F("SCL (A5) idle: ")); Serial.println(scl ? F("HIGH") : F("LOW"));
-  if (!sda || !scl) {
-    Serial.println(F("  A line is LOW at rest. Expect HIGH on both."));
-    Serial.println(F("  -> SDA or SCL shorted to ground"));
-    Serial.println(F("  -> a device holding the bus down"));
-    Serial.println(F("  -> no pull-ups AND nothing driving the line"));
-  } else {
-    Serial.println(F("  Both high: pull-ups present, bus idle. Good."));
-  }
+
+const uint8_t AS5600 = 0x36;      // an AS5600L answers at 0x40 instead
+
+static uint16_t g_first = 0;      // reference for the span
+static int16_t  g_lo = 0, g_hi = 0;
+static bool     g_haveFirst = false;
+
+// Signed shortest way round, so turning through 0/4095 does not look like a
+// jump of a whole turn.
+int16_t angleDiff(uint16_t a, uint16_t b) {
+  int16_t d = (int16_t)a - (int16_t)b;
+  if (d >  2048) d -= 4096;
+  if (d < -2048) d += 4096;
+  return d;
 }
-const __FlashStringHelper* i2cError(uint8_t code) {
-  switch (code) {
-    case 0: return F("ok");
-    case 1: return F("data too long");
-    case 2: return F("NACK on address - nobody home at that address");
-    case 3: return F("NACK on data");
-    case 4: return F("bus error");
-    case 5: return F("timeout");
-    default: return F("unknown");
-  }
-}
-bool scanBus() {
-  Serial.println(F("Scanning 0x01-0x7E..."));
-  uint8_t found = 0;
-  bool sawTarget = false;
-  for (uint8_t a = 1; a < 127; a++) {
-    Wire.beginTransmission(a);
-    if (Wire.endTransmission() == 0) {
-      Serial.print(F("  0x"));
-      if (a < 16) Serial.print('0');
-      Serial.print(a, HEX);
-      if      (a == 0x36) { Serial.print(F("  <- AS5600")); sawTarget = true; }
-      else if (a == 0x27 || a == 0x3F) Serial.print(F("  <- LCD backpack"));
-      Serial.println();
-      found++;
-    }
-  }
-  if (found == 0) {
-    Serial.println(F("  NOTHING on the bus."));
-    Serial.println(F("  -> SDA and SCL swapped (SDA=A4, SCL=A5)"));
-    Serial.println(F("  -> VCC or GND not actually connected"));
-    Serial.println(F("  -> a header pin soldered but not wetted to the pad"));
-    Serial.println(F("     (check continuity pin-to-pad with a meter)"));
-  } else if (!sawTarget) {
-    Serial.println(F("  Bus works, but nothing at 0x36."));
-    Serial.println(F("  The AS5600 address is fixed, so a device at some"));
-    Serial.println(F("  other address is a different part than you think."));
-  }
-  return sawTarget;
-}
-uint8_t reg8(uint8_t r, bool* ok) {
+
+// The sketches' way: one transaction, repeated start, two bytes.
+bool readBurst(uint8_t reg, uint16_t* out) {
   Wire.beginTransmission(AS5600);
-  Wire.write(r);
-  const uint8_t e = Wire.endTransmission(false);
-  if (e != 0) { *ok = false; return 0; }
-  if (Wire.requestFrom(AS5600, (uint8_t)1) != 1) { *ok = false; return 0; }
-  *ok = true;
-  return Wire.read();
-}
-uint16_t reg12(uint8_t r, bool* ok) {
-  Wire.beginTransmission(AS5600);
-  Wire.write(r);
-  const uint8_t e = Wire.endTransmission(false);
-  if (e != 0) { *ok = false; return 0; }
-  if (Wire.requestFrom(AS5600, (uint8_t)2) != 2) { *ok = false; return 0; }
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(AS5600, (uint8_t)2) != 2) return false;
   const uint8_t hi = Wire.read(), lo = Wire.read();
-  *ok = true;
-  return (((uint16_t)hi << 8) | lo) & 0x0FFF;
+  *out = (((uint16_t)hi << 8) | lo) & 0x0FFF;
+  return true;
 }
+
+// The reference's way: one register per transaction, each ended with a STOP.
+bool readOne(uint8_t reg, uint8_t* out) {
+  Wire.beginTransmission(AS5600);
+  Wire.write(reg);
+  if (Wire.endTransmission() != 0) return false;
+  if (Wire.requestFrom(AS5600, (uint8_t)1) != 1) return false;
+  *out = Wire.read();
+  return true;
+}
+
+bool readSplit(uint16_t* out) {
+  uint8_t lo, hi;
+  if (!readOne(0x0D, &lo)) return false;   // RAW ANGLE 7:0
+  if (!readOne(0x0C, &hi)) return false;   // RAW ANGLE 11:8
+  *out = (((uint16_t)hi << 8) | lo) & 0x0FFF;
+  return true;
+}
+
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   delay(300);
   Serial.println();
-  Serial.println(F("=== AS5600 simple test ==="));
-  Serial.println(F("Serial Monitor at 9600 baud."));
-  Serial.println();
-  checkIdleLevels();
-  Serial.println();
+  Serial.println(F("=== AS5600 bench: burst vs split read ==="));
   Wire.begin();
-  g_found = scanBus();
-  Serial.println();
-  if (g_found) Serial.println(F("angle    degrees   AGC   magnet"));
+  Wire.setClock(100000);   // slow enough for a BSS138 shifter
+
+  Wire.beginTransmission(AS5600);
+  if (Wire.endTransmission() != 0) {
+    Serial.println(F("Nothing at 0x36. Run as5600_simple for the bus scan."));
+  }
+  Serial.println(F("Turn the magnet one full turn, slowly. Any key resets span."));
+  Serial.println(F("burst  split  deg      span    magnet  agc  magnitude"));
 }
+
 void loop() {
-  if (!g_found) {
-    // Keep looking. Wiggle a wire and watch it turn up.
-    if (millis() >= g_nextScan) {
-      g_nextScan = millis() + 2000;
-      Wire.beginTransmission(AS5600);
-      const uint8_t e = Wire.endTransmission();
-      Serial.print(F("0x36: "));
-      Serial.println(i2cError(e));
-      if (e == 0) {
-        Serial.println(F("Found it. Reading angles:"));
-        Serial.println(F("angle    degrees   AGC   magnet"));
-        g_found = true;
-      }
-    }
+  if (Serial.available()) {
+    while (Serial.available()) Serial.read();
+    g_haveFirst = false;
+    Serial.println(F("-- span reset --"));
+  }
+
+  uint16_t burst = 0, split = 0, mag = 0;
+  uint8_t st = 0, agc = 0;
+  const bool okB = readBurst(0x0C, &burst);
+  const bool okS = readSplit(&split);
+  const bool okM = readBurst(0x1B, &mag);    // MAGNITUDE, 12 bits
+  const bool okT = readOne(0x0B, &st);       // STATUS
+  const bool okA = readOne(0x1A, &agc);      // AGC
+
+  if (!okB || !okS || !okM || !okT || !okA) {
+    Serial.println(F("read failed -- check wiring, then run as5600_simple"));
+    delay(500);
     return;
   }
-  bool ok1, ok2, ok3;
-  const uint16_t raw = reg12(0x0C, &ok1);   // RAW_ANGLE
-  const uint8_t  st  = reg8(0x0B, &ok2);    // STATUS
-  const uint8_t  agc = reg8(0x1A, &ok3);    // AGC
-  if (!ok1 || !ok2 || !ok3) {
-    Serial.println(F("lost it - connection dropped mid-read"));
-    g_found = false;
-    g_nextScan = millis() + 2000;
-    return;
-  }
-  Serial.print(raw);
+
+  if (!g_haveFirst) { g_first = burst; g_lo = 0; g_hi = 0; g_haveFirst = true; }
+  const int16_t off = angleDiff(burst, g_first);
+  if (off < g_lo) g_lo = off;
+  if (off > g_hi) g_hi = off;
+  const float spanDeg = (float)(g_hi - g_lo) * (360.0f / 4096.0f);
+
+  Serial.print(burst);                          Serial.print(F("\t"));
+  Serial.print(split);
+  // A difference of a count or two is the angle moving between the two reads.
+  if (abs(angleDiff(burst, split)) > 4) Serial.print('!');
   Serial.print(F("\t"));
-  Serial.print(raw * (360.0f / 4096.0f), 2);   // 0.0879 deg per count
-  Serial.print(F("\t  "));
-  Serial.print(agc);
+  Serial.print(burst * (360.0f / 4096.0f), 2);  Serial.print(F("\t"));
+  Serial.print(spanDeg, 1);                     Serial.print(F("\t"));
+  if      (!(st & 0x20)) Serial.print(F("NONE"));
+  else if (st & 0x10)    Serial.print(F("weak"));
+  else if (st & 0x08)    Serial.print(F("strong"));
+  else                   Serial.print(F("ok"));
   Serial.print(F("\t"));
-  // MD bit5 = detected, ML bit4 = too weak, MH bit3 = too strong.
-  if      (!(st & 0x20)) Serial.println(F("NONE - wrong magnet type, or too far"));
-  else if (st & 0x10)    Serial.println(F("weak - move closer"));
-  else if (st & 0x08)    Serial.println(F("strong - move further"));
-  else                   Serial.println(F("ok"));
-  delay(500);
+  Serial.print(agc);                            Serial.print(F("\t"));
+  Serial.println(mag);
+
+  delay(250);
 }
