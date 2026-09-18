@@ -161,6 +161,51 @@ bool refActive() { return digitalRead(PIN_REF) == LOW; }
 bool refActive() { return false; }        // not fitted
 #endif
 
+// Kill switch. See Config.h: it latches a fault, and it is a request to the
+// firmware, not a power cut.
+#if USE_KILL
+bool killAsserted() {
+#if KILL_IS_NORMALLY_CLOSED
+  return digitalRead(PIN_KILL) == HIGH;   // thrown, or the wire is broken
+#else
+  return digitalRead(PIN_KILL) == LOW;
+#endif
+}
+#else
+bool killAsserted() { return false; }     // not fitted
+#endif
+
+// ---------------------------------------------------------------------------
+//  Buzzer
+// ---------------------------------------------------------------------------
+//  tone() with a duration returns at once and Timer2 ends the note, so the
+//  only state kept here is how many more beeps are owed and when the next
+//  one starts. A new pattern replaces whatever was still playing.
+
+#if USE_BUZZER
+static uint16_t      g_beepMs   = 0;
+static uint8_t       g_beepLeft = 0;
+static unsigned long g_beepNext = 0;
+
+void beep(uint8_t count, uint16_t ms) {
+  g_beepMs = ms;
+  g_beepLeft = count;
+  g_beepNext = millis();
+}
+
+void buzzerTick() {
+  if (g_beepLeft == 0) return;
+  const unsigned long now = millis();
+  if ((long)(now - g_beepNext) < 0) return;
+  tone(PIN_BUZZER, BEEP_HZ, g_beepMs);
+  g_beepLeft--;
+  g_beepNext = now + 2UL * g_beepMs;      // the note, then an equal gap
+}
+#else
+void beep(uint8_t count, uint16_t ms) { (void)count; (void)ms; }
+void buzzerTick() {}
+#endif
+
 // ---------------------------------------------------------------------------
 //  Motor
 // ---------------------------------------------------------------------------
@@ -341,6 +386,7 @@ const __FlashStringHelper *faultName(Fault f) {
     case F_CURRENT: return F("current");
     case F_RANGE:   return F("range");
     case F_REF:     return F("ref");
+    case F_KILL:    return F("kill");
   }
   return F("?");
 }
@@ -363,6 +409,7 @@ void raiseFault(Fault f) {
   pidReset();
   g_fault = f;
   g_state = ST_FAULT;
+  beep(3, BEEP_LONG_MS);
   Serial.print(F("FAULT "));
   Serial.println(faultName(f));
 }
@@ -408,6 +455,7 @@ void printStatus() {
   Serial.print(F(" refpos=")); Serial.print(g_refRawPos);
   Serial.print(F(" refneg=")); Serial.print(g_refRawNeg);
   Serial.print(F(" ref="));    Serial.print(refActive() ? 1 : 0);
+  Serial.print(F(" kill="));   Serial.print(killAsserted() ? 1 : 0);
   Serial.print(F(" owner="));  Serial.print(g_owner == OWN_LOCAL ? F("local") : F("remote"));
   Serial.print(F(" kp="));     printDeg(g_kp);
   Serial.print(F(" ki="));     printDeg(g_ki);
@@ -580,6 +628,7 @@ void beginRefPass(bool adopt) {
 void finishRefPass() {
   motorOff();
   g_state = ST_IDLE;
+  beep(2, BEEP_SHORT_MS);
 
   Serial.print(F("crossings: +dir raw ")); Serial.print(g_refSeenPos);
   Serial.print(F("  -dir raw "));          Serial.println(g_refSeenNeg);
@@ -853,7 +902,7 @@ void printHelp() {
   Serial.println(F("  t <deg>    step test, CSV out"));
   Serial.println(F("  n          reed noise floor"));
   Serial.println(F("  w          save zero + gains"));
-  Serial.println(F("  k          clear fault"));
+  Serial.println(F("  k          clear fault (not while the kill switch is thrown)"));
 }
 
 void monitorEncoder() {
@@ -927,6 +976,12 @@ void handleLine(char *s) {
     case 'w': saveSettings(); break;
 
     case 'k':
+      // Clearing a kill that is still thrown would re-arm the bridge against
+      // the one switch someone threw on purpose.
+      if (killAsserted()) {
+        Serial.println(F("kill switch is still thrown -- release it first"));
+        break;
+      }
       g_fault = F_NONE;
       g_state = ST_IDLE;
       g_encFails = 0;
@@ -973,6 +1028,13 @@ void setup() {
   // Claim the bridge low BEFORE anything else. An unconfigured output is a
   // floating input, and a driver gets to decide for itself what that means.
 #if MOTOR_DRIVER == DRV_L298N
+  #if L298N_CHANNEL == 2
+  // The dead channel first: see PIN_DEAD_* in Config.h for what a floating
+  // ENA does to a shorted high side.
+  pinMode(PIN_DEAD_ENA, OUTPUT); digitalWrite(PIN_DEAD_ENA, LOW);
+  pinMode(PIN_DEAD_IN1, OUTPUT); digitalWrite(PIN_DEAD_IN1, LOW);
+  pinMode(PIN_DEAD_IN2, OUTPUT); digitalWrite(PIN_DEAD_IN2, LOW);
+  #endif
   pinMode(PIN_ENA, OUTPUT);
   pinMode(PIN_IN1, OUTPUT);
   pinMode(PIN_IN2, OUTPUT);
@@ -998,6 +1060,9 @@ void setup() {
   pinMode(PIN_BTN_EXTEND,  INPUT_PULLUP);
   pinMode(PIN_BTN_RETRACT, INPUT_PULLUP);
   pinMode(PIN_BTN_STOP,    INPUT_PULLUP);
+#endif
+#if USE_KILL
+  pinMode(PIN_KILL,        INPUT_PULLUP);
 #endif
 #if USE_BUZZER
   pinMode(PIN_BUZZER, OUTPUT);
@@ -1034,7 +1099,12 @@ void setup() {
     Serial.print(F("boot position "));
     printDeg(positionDeg());
     Serial.println(F(" deg -- no homing needed"));
+    beep(1, BEEP_SHORT_MS);
   }
+
+  // Booting into a thrown kill switch must not look like a healthy start.
+  // Checked last so it is the fault that stands.
+  if (killAsserted()) raiseFault(F_KILL);
 
   Serial.println(F("? for help"));
   g_lastLoopMs = millis();
@@ -1042,6 +1112,13 @@ void setup() {
 
 void loop() {
   pollSerial();
+  buzzerTick();
+
+  // Every pass, not every LOOP_MS tick: the kill switch should not wait for
+  // the control loop. Latched once, so a held switch does not refire.
+  if (killAsserted() && !(g_state == ST_FAULT && g_fault == F_KILL)) {
+    raiseFault(F_KILL);
+  }
 
   const unsigned long now = millis();
   if (now - g_lastLoopMs < LOOP_MS) return;

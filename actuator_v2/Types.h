@@ -25,7 +25,8 @@ struct PidState {
 enum State : uint8_t { ST_IDLE, ST_MOVING, ST_JOG, ST_MANUAL, ST_STEPTEST, ST_REFPASS, ST_FAULT };
 
 enum Fault : uint8_t {
-  F_NONE = 0, F_STALL, F_LINKAGE, F_ENCODER, F_LIMIT, F_TIMEOUT, F_CURRENT, F_RANGE, F_REF
+  F_NONE = 0, F_STALL, F_LINKAGE, F_ENCODER, F_LIMIT, F_TIMEOUT, F_CURRENT, F_RANGE, F_REF,
+  F_KILL
 };
 
 // Who last commanded the axis.

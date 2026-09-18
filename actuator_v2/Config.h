@@ -42,21 +42,48 @@
 #define MOTOR_DRIVER  DRV_L298N      // <-- match your hardware
 
 #if MOTOR_DRIVER == DRV_L298N
-  // Same pins v1 used, because that is the code that has actually turned the
-  // motor. ENA is Timer1; IN1/IN2 are digitalWrite only, never PWM.
-  const uint8_t PIN_ENA = 9;
-  const uint8_t PIN_IN1 = 6;
-  const uint8_t PIN_IN2 = 5;
+  // Channel B, the same pins v1 and reed_switch_test use. Channel A on this
+  // board is DEAD, and dangerously so: OUT1's high side is shorted on. It
+  // held ~20 V after motorOff() and no firmware can switch it off. Leave
+  // OUT1/OUT2 unconnected and do not put this back to 1.
+  //
+  // The names stay ENA/IN1/IN2 so the driver code reads the same either way;
+  // on channel 2 they are wired to ENB/IN3/IN4. ENB is Timer1 (OC1B), the
+  // same timer and ~490 Hz that D9 gave channel A.
+  #define L298N_CHANNEL 2
+
+  #if L298N_CHANNEL == 1
+    const uint8_t PIN_ENA = 9;    // ENA
+    const uint8_t PIN_IN1 = 6;    // IN1
+    const uint8_t PIN_IN2 = 5;    // IN2
+  #elif L298N_CHANNEL == 2
+    const uint8_t PIN_ENA = 10;   // ENB  -- must be a PWM pin
+    const uint8_t PIN_IN1 = 8;    // IN3
+    const uint8_t PIN_IN2 = 12;   // IN4
+
+    // The dead channel's inputs, held LOW from the first line of setup().
+    // Left floating, ENA can drift high while IN1 drifts low, which turns
+    // OUT1's low side on underneath the shorted high side: a dead short from
+    // the 25 V rail through the die, taking channel B with it. The module's
+    // ENA jumper must be OFF for this to mean anything.
+    const uint8_t PIN_DEAD_ENA = 9;
+    const uint8_t PIN_DEAD_IN1 = 6;
+    const uint8_t PIN_DEAD_IN2 = 5;
+  #else
+    #error "Set L298N_CHANNEL to 1 or 2"
+  #endif
 #elif MOTOR_DRIVER == DRV_G2
   const uint8_t PIN_PWM = 9;   // Timer1. Never 5/6: analogWrite(0) on Timer0
-  const uint8_t PIN_DIR = 7;   //   may not fully release the output.
+                               //   may not fully release the output.
+  const uint8_t PIN_DIR = 12;  // not D7: D7 is the kill input on both drivers
   const uint8_t PIN_SLP = 8;   // HIGH = awake. LOW is the hard off switch.
 #else
   #error "Set MOTOR_DRIVER to DRV_L298N or DRV_G2"
 #endif
 
 // Current sense. The G2 provides one; the L298N module's sense pins are
-// usually jumpered to ground, so leave USE_CURRENT_LIMIT off with it.
+// usually jumpered to ground, so leave USE_CURRENT_LIMIT off with it. A3 is
+// shared with the reference switch -- see PIN_REF below.
 const uint8_t PIN_CS = A3;
 
 // ===========================================================================
@@ -68,11 +95,10 @@ const uint8_t PIN_CS = A3;
 //  dish sits still for hours, so thermal mass matters more than the
 //  continuous rating.
 //
-//    1. CURRENT. 2 A per channel. PARALLEL THE TWO BRIDGES -- tie IN1 to IN3,
-//       IN2 to IN4, ENA to ENB, OUT1 to OUT3 and OUT2 to OUT4 -- and you get
-//       about 4 A. The second bridge is sitting there unused; there is no
-//       reason not to. The datasheet sanctions it and the on-resistance
-//       handles the sharing.
+//    1. CURRENT. 2 A per channel. On a healthy module the two bridges can be
+//       paralleled for about 4 A. NOT ON THIS ONE: channel A's high side is
+//       shorted, and tying OUT1 to OUT3 would put that short on the motor
+//       lead. This board runs channel B alone, so 2 A is the ceiling.
 //
 //    2. HEAT. The outputs are Darlingtons, so they drop 2-3 V regardless of
 //       load. At 3 A that is 7 W in the package, and the postage-stamp
@@ -98,15 +124,29 @@ const uint8_t PIN_LIM_POS = 3;
 const uint8_t PIN_LIM_NEG = 4;
 
 // Reference switch, mid-travel. NOT one of the hard stops -- see section 4b
-// for why that distinction is the whole point. D10 rather than D5, because
-// D5 is the L298N's IN2 and a pin map that only works on one driver is a trap.
-// NOT FITTED YET: USE_REF_SWITCH is 0 in section 4b.
-const uint8_t PIN_REF = 10;
+// for why that distinction is the whole point. A3, because D10 is now the
+// L298N's ENB and a pin map that only works on one driver is a trap. A3 is
+// free on both drivers unless the G2's current sense is in use; the #error
+// below catches that. NOT FITTED YET: USE_REF_SWITCH is 0 in section 4b.
+const uint8_t PIN_REF = A3;
 
 const uint8_t PIN_BTN_EXTEND  = A0;
 const uint8_t PIN_BTN_RETRACT = A1;
 const uint8_t PIN_BTN_STOP    = A2;
 const uint8_t PIN_BUZZER      = 11;
+
+// KILL SWITCH on D7, the pin v1 uses. It is a latching fault: the motor stops
+// on the first sample, and 'k' refuses to clear it while the switch is still
+// thrown. It is still only a request to the firmware -- it cannot stop a
+// shorted bridge -- so the E-stop's other pole must break the +25 V line.
+//
+// Set KILL_IS_NORMALLY_CLOSED to 1 for an NC contact held closed to GND,
+// which is what WIRING.md draws: a broken wire or a pulled connector reads as
+// KILLED. Set it to 0 for a common normally-open button between D7 and GND.
+// Get it backwards and the sketch boots killed, which is the safe way round.
+const uint8_t PIN_KILL = 7;
+#define USE_KILL                1
+#define KILL_IS_NORMALLY_CLOSED 1
 
 // MANUAL MODE. Hold-to-run: released is stopped, that instant. A serial
 // console has no key-up event, which is why the bring-up sketches jogged on a
@@ -116,7 +156,19 @@ const uint8_t PIN_BUZZER      = 11;
 // takes ownership of the axis, because the person holding the button is
 // standing next to the dish and the host is not.
 #define USE_BUTTONS 1
-#define USE_BUZZER  0
+
+// BUZZER on D11 through an NPN (WIRING.md). tone() owns Timer2, which only
+// costs PWM on D3 and D11 -- D3 is a limit input, so nothing is lost; the
+// motor PWM is Timer1. Three sounds, none of which ever blocks the loop:
+//   one short    booted and the encoder answered
+//   two short    reference pass finished (the "homing" pass, 'h' / 'H')
+//   three long   any fault, the kill switch included
+// A passive piezo sounds at BEEP_HZ. An active buzzer sounds at its own pitch
+// and just follows the on/off pattern.
+#define USE_BUZZER  1
+const uint16_t BEEP_HZ       = 2000;
+const uint16_t BEEP_SHORT_MS = 70;
+const uint16_t BEEP_LONG_MS  = 400;
 
 const uint16_t BTN_DEBOUNCE_MS = 25;
 
@@ -307,6 +359,10 @@ const unsigned long MAX_RUN_MS = 30000;
 // against a clamp meter.
 #define USE_CURRENT_LIMIT 0
 const uint16_t CURRENT_TRIP_ADC = 700;   // PLACEHOLDER raw ADC counts
+
+#if USE_CURRENT_LIMIT && USE_REF_SWITCH
+  #error "A3 cannot be both the current sense and the reference switch -- move PIN_REF"
+#endif
 
 // ===========================================================================
 //  6. CONSOLE

@@ -73,7 +73,9 @@ should be running right now.
 ±15°) and [WIRING.md](WIRING.md) came in with it; its README is kept whole at
 [docs/actuator-v2-readme.md](docs/actuator-v2-readme.md). **WIRING.md
 describes v2's panel pins, not the bench's** — the bench is still buttons on
-D3/D4 and kill on D7, per `actuator_v1/Config.h`.
+D3/D4 and kill on D7, per `actuator_v1/Config.h`. Both run the motor on
+channel B, and both read the kill switch on D7; v2's buttons are on A0–A2 and
+its ±15° cam flags take D3/D4, so rewire those before flashing v2.
 
 ### The three documents that matter
 
@@ -105,7 +107,7 @@ system is unknown and every constant downstream is a guess.
 | | |
 |---|---|
 | Actuator | HTS TVRO linear, internal reed sensor, internal cam limits |
-| Bridge | L298N on D9 (ENA) / D6 (IN1) / D5 (IN2) — see the warning below |
+| Bridge | L298N channel B on D10 (ENB) / D8 (IN3) / D12 (IN4); channel A dead, D9/D6/D5 held low — see the warning below |
 | Sensor | Reed to D2 and GND, `INPUT_PULLUP`, falling-edge interrupt |
 | Supply | 24 V DC bench supply |
 | Mounted | Yes — the dish is on, so both cams sweep the full arc |

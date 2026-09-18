@@ -30,26 +30,32 @@ L298N is a 2 A part with a 2–3 V drop being asked to run a jack at 25 V.
 |---|---|---|
 | D0, D1 | USB serial | Console, and the target-angle channel from the host |
 | D2 | Reed switch | **INT0.** Health witness — nothing integrates it any more |
-| D3 | Limit flag, +15° | NC to GND, `INPUT_PULLUP` |
-| D4 | Limit flag, −15° | NC to GND, `INPUT_PULLUP` |
-| D10 | **Reference switch** | Mid-travel, to GND. Not a stop — see below. **Not fitted yet** |
-| D5 | L298N **IN2** | `digitalWrite` only, never PWM |
-| D6 | L298N **IN1** | `digitalWrite` only, never PWM |
-| D9 | L298N **ENA** | PWM, Timer1 |
+| D3 | Limit flag, +15° | Cam pole B, NC to GND, `INPUT_PULLUP` |
+| D4 | Limit flag, −15° | Cam pole B, NC to GND, `INPUT_PULLUP` |
+| D5 · D6 · D9 | L298N channel A — **dead** | Held LOW from the first line of `setup()`. OUT1/OUT2 stay unconnected |
+| D7 | **Kill switch** | E-stop pole 2, NC to GND, `INPUT_PULLUP` |
+| D8 | L298N **IN3** | `digitalWrite` only, never PWM |
+| D10 | L298N **ENB** | PWM, Timer1 |
 | D11 | Buzzer | Via a transistor |
-| A0 · A1 · A2 | Buttons | To GND, `INPUT_PULLUP` |
-| A3 | Driver current sense | Analog. The G2 provides one; the L298N module usually grounds its sense pins, so `USE_CURRENT_LIMIT` stays off |
+| D12 | L298N **IN4** | `digitalWrite` only, never PWM |
+| A0 · A1 · A2 | Extend · retract · stop buttons | NO to GND, `INPUT_PULLUP` |
+| A3 | **Reference switch** | Mid-travel, NO to GND. Not a stop — see below. **Not fitted yet**. Also the G2's current sense, so not both |
 | A4 | I2C SDA | AS5600 at 0x36, through a level shifter |
 | A5 | I2C SCL | " |
-| D7, D8, D12, D13 | free | Four spare. D7/D8 are the G2's DIR and /SLP when that driver is selected |
+| D13 | free | Carries the on-board LED |
 
 **I2C is A4/A5 and cannot be moved.** `Wire` on a 328P is tied to that
 peripheral. An encoder on any other pin will not enumerate.
 
-`MOTOR_DRIVER` in `Config.h` picks the pin set. It defaults to `DRV_L298N`,
-which is what is on the bench and uses the same three pins v1 did — that being
-the only code that has ever turned this motor. `DRV_G2` switches to the
-Pololu's two-pin interface on D7/D9 plus `/SLP` on D8.
+`MOTOR_DRIVER` in `Config.h` picks the pin set. It defaults to `DRV_L298N` on
+channel B (`L298N_CHANNEL 2`), the same pins v1 and `reed_switch_test` use —
+channel A on this module has a shorted high side, see the README. `DRV_G2`
+switches to the Pololu's two-pin interface: PWM on D9, DIR on D12, `/SLP` on
+D8. D7 stays the kill input on both drivers.
+
+**Take the ENA and ENB jumpers off the module.** They tie the enables to 5 V.
+With the ENA jumper on, holding D9 low does nothing, and the shorted high side
+becomes a short across the 25 V rail the first time IN1 goes low.
 
 `/SLP` is the pin most easily forgotten on the G2. It boots asleep, and a
 perfectly correct PWM into a sleeping bridge moves nothing while looking
@@ -63,9 +69,10 @@ not the problem. Three other things are, and all are survivable for bring-up
 because the duty cycle is tiny: a move takes seconds and then the dish sits
 for hours, so thermal mass matters more than the continuous rating.
 
-1. **Current.** 2 A per channel. **Parallel the two bridges** — IN1 to IN3,
-   IN2 to IN4, ENA to ENB, OUT1 to OUT3, OUT2 to OUT4 — for about 4 A. The
-   second bridge is sitting idle and the datasheet sanctions this.
+1. **Current.** 2 A per channel. On a healthy module the two bridges can be
+   paralleled for about 4 A. **Not on this one:** channel A's high side is
+   shorted, and joining OUT1 to OUT3 would put that short on the motor lead.
+   This board runs channel B alone, so 2 A is the ceiling.
 2. **Heat.** The outputs are Darlingtons and drop 2–3 V regardless of load. At
    3 A that is ~7 W in the package, and the postage-stamp heatsink on the red
    modules will not carry it. Fit a real one.
@@ -106,10 +113,19 @@ whatever duty the PID asked for. `as5600_test`'s sweep prints `counting UP` /
 
 ### Level shifting
 
-The AS5600 is a 3.3 V part and the Uno's I2C is 5 V. A 5 V AVR reading a 3.3 V
-high is marginal by specification rather than comfortably correct, so fit a
-BSS138-based bidirectional shifter and pull the encoder side up to 3.3 V.
-Don't run it direct and rely on it working on the bench.
+Run at 3.3 V, the AS5600 cannot be wired straight to the Uno's 5 V I2C. A 5 V
+AVR reading a 3.3 V high is marginal by specification rather than comfortably
+correct, so fit a BSS138-based bidirectional shifter and pull the encoder side
+up to 3.3 V. Don't run it direct and rely on it working on the bench.
+
+- **The shifter does not make 3.3 V.** Its LV pin needs 3.3 V from somewhere:
+  the Uno's `3.3V` pin (about 50 mA available; the AS5600 draws under 10 mA)
+  feeds both LV and the encoder's VCC. HV takes the Uno's `5V`.
+- **Tie DIR to GND** (or VCC). A floating DIR lets the counting direction
+  change on its own. Check whether the module already straps it.
+- The chip also has a 5 V operating mode. If the module is built for it, it
+  can go straight onto 5 V, A4 and A5 with no shifter. Check the module's own
+  documentation before relying on this.
 
 ## Travel limits
 
@@ -134,7 +150,7 @@ with no way back. Put both switches in series in one motor lead, each bypassed
 by a power diode, with the diodes facing opposite ways:
 
 ```
-  L298N OUT1+3 ──┬── SW+ ──┬──┬── SW− ──┬──── MOTOR ──── L298N OUT2+4
+  L298N OUT3 ────┬── SW+ ──┬──┬── SW− ──┬──── MOTOR ──── L298N OUT4
                  └── D+ ───┘  └── D− ───┘
                      →            ←
 ```
@@ -146,6 +162,13 @@ by a power diode, with the diodes facing opposite ways:
 
 Use **normally-closed** contacts so a broken wire reads as a tripped limit
 rather than as permission to keep going.
+
+**Each cam needs two contacts** — a DPDT microswitch, or two switches on one
+lobe. Pole A is the NC contact in the motor lead above. Pole B is a second NC
+contact from D3 (+15°) or D4 (−15°) to GND, so the firmware knows which cam
+tripped. One SPDT cannot do both: its spare contact is NO, and a broken wire
+on an NO flag reads as "not at the limit". Pole A breaks full motor current at
+25 V DC, so check the switch's **DC** rating, not the AC figure on its body.
 
 Size the diodes for **full motor current** — they carry it whenever you are
 driving off a limit — so a 15 A, 45 V Schottky on a small heatsink, not a
@@ -214,6 +237,23 @@ move first, so reaching a cam means something went wrong. Clear it with `k`
 and jog away — the firmware blocks the direction that would go further in and
 allows the one that escapes.
 
+## Kill switch
+
+A latching E-stop with **two NC poles**:
+
+- **Pole 1 in the +25 V line**, between the supply and C1/the driver's VS.
+  This is the part that actually stops the motor. Rate it for the motor's DC
+  current, like the cam contacts.
+- **Pole 2 from D7 to GND**, so the firmware knows. With
+  `KILL_IS_NORMALLY_CLOSED 1` a thrown switch or a broken wire reads HIGH and
+  latches the `kill` fault. `k` refuses to clear it while the switch is still
+  thrown, and booting with it thrown boots into the fault.
+
+Pole 2 alone is not a kill switch. It asks the firmware to call `motorOff()`,
+and a shorted bridge does not listen — that is exactly how channel A failed.
+For a plain normally-open button on D7 instead, set `KILL_IS_NORMALLY_CLOSED`
+to 0.
+
 ## Power
 
 Two rails, one ground, and the ground is the part that matters.
@@ -246,8 +286,9 @@ the pickup path the noise-floor issue in the README is about.
 
 ### 5 V
 
-USB makes it. Feed the driver's logic supply and the level shifter from the
-Arduino's `5V` pin; the shifter's low side makes the 3.3 V for the encoder.
+USB makes it. Feed the driver's logic supply and the level shifter's HV side
+from the Arduino's `5V` pin. The shifter's LV side and the encoder take 3.3 V
+from the Arduino's `3.3V` pin — the shifter does not make it.
 
 Never drive the Arduino's `5V` pin from an external supply while USB is
 connected — that puts the two in a fight through the USB polyfuse, and the
@@ -317,7 +358,10 @@ to GND, buzzer between 5 V and the collector, and a 1N4148 across it if it is
 magnetic. Direct off the pin only for a bare piezo under 10 mA.
 
 `tone()` is safe here: it owns Timer2, which drives PWM on D3 and D11, and
-motor PWM is Timer1 on D9.
+motor PWM is Timer1 on D10 (D9 on the G2). `USE_BUZZER` is on, and
+the patterns are one short beep at a good boot, two short beeps when a
+reference pass finishes, and three long beeps on any fault, the kill switch
+included. None of them blocks the loop. Set `USE_BUZZER` to 0 if nothing is fitted.
 
 ## Build order
 

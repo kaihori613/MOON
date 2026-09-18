@@ -534,7 +534,8 @@ syntax-checked on every change, in all four combinations with `USE_REF_SWITCH`,
 so switching later stays a config change rather than a rewrite.
 
 **The L298N at 25 V needs three things:** the `5V-EN` jumper off, the two
-bridges paralleled for ~4 A, and a real heatsink — the Darlington outputs drop
+bridges paralleled for ~4 A (not on the bench module: its channel A is
+shorted, so it runs channel B alone), and a real heatsink — the Darlington outputs drop
 2–3 V regardless of load, so at 3 A that is 7 W in the package. It is inside
 its voltage rating and the duty cycle here is tiny, but measure the stall
 current before trusting it. WIRING.md has the detail.
