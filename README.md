@@ -224,8 +224,10 @@ cutting current into a genuine jam.
 
 Neither of these should be touched before the calibration lands.
 
-**`actuator_v1/`** — the closed-loop controller. Compiles clean, 63% flash on a
-328P, **never run**. Six states, zero transitions ever executed. Its design
+**`actuator_v1/`** — the closed-loop controller. Compiles for `arduino:avr:uno`
+(arduino-cli 1.5.1, 18 Sep 2026): 71% flash, 18% RAM on a 328P, **never run**.
+Its enums and structs live in `Types.h` so the builder's generated prototypes
+can see them. Six states, zero transitions ever executed. Its design
 rationale is worth keeping and lives in [docs/design-notes.md](docs/design-notes.md)
 and in the sketch's own comments.
 

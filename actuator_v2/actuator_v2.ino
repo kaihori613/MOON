@@ -14,6 +14,7 @@
 //  Nothing here has been on hardware.
 
 #include "Config.h"
+#include "Types.h"
 #include <Wire.h>
 #if USE_EEPROM
   #include <EEPROM.h>
@@ -233,12 +234,7 @@ static float g_ki = KI_DEFAULT;
 static float g_kd = KD_DEFAULT;
 static float g_kff = KFF_DEFAULT;
 
-struct PidState {
-  float integral;
-  float prevMeas;
-  bool  primed;
-  bool  holdIntegral;   // set when the output saturated last tick
-};
+// PidState is defined in Types.h.
 static PidState g_pid = {0.0f, 0.0f, false, false};
 
 void pidReset() {
@@ -299,12 +295,9 @@ float pidStep(float target, float meas, float dt) {
 //  State
 // ---------------------------------------------------------------------------
 
-enum State : uint8_t { ST_IDLE, ST_MOVING, ST_JOG, ST_MANUAL, ST_STEPTEST, ST_REFPASS, ST_FAULT };
-static State g_state = ST_IDLE;
+// State, Fault, Owner and RefPhase are defined in Types.h.
 
-enum Fault : uint8_t {
-  F_NONE = 0, F_STALL, F_LINKAGE, F_ENCODER, F_LIMIT, F_TIMEOUT, F_CURRENT, F_RANGE, F_REF
-};
+static State g_state = ST_IDLE;
 static Fault g_fault = F_NONE;
 
 static float         g_target      = 0.0f;
@@ -321,11 +314,9 @@ static unsigned long g_lastTeleMs  = 0;
 // Who last commanded the axis. Not a permission system -- every command is
 // still accepted -- but the host needs to know it was pre-empted by someone
 // at the panel, and "why did my move stop" should have an answer.
-enum Owner : uint8_t { OWN_LOCAL, OWN_REMOTE };
 static Owner g_owner = OWN_LOCAL;
 
 // reference switch
-enum RefPhase : uint8_t { RP_GOTO_START, RP_CROSS_POS, RP_GOTO_END, RP_CROSS_NEG };
 static RefPhase g_refPhase = RP_GOTO_START;
 static bool     g_refAdopt = false;
 static bool     g_refPrev  = false;          // last polled switch state
@@ -431,13 +422,7 @@ void printStatus() {
 // ---------------------------------------------------------------------------
 
 #if USE_EEPROM
-struct Saved {
-  uint32_t magic;
-  int16_t  zero;
-  int16_t  refPos;
-  int16_t  refNeg;
-  float    kp, ki, kd, kff;
-};
+// Saved is defined in Types.h.
 
 void saveSettings() {
   Saved s;
@@ -514,12 +499,7 @@ void beginJog(int8_t dir, uint16_t ms) {
 //  believe a change until it has held for BTN_DEBOUNCE_MS.
 
 #if USE_BUTTONS
-struct Button {
-  uint8_t  pin;
-  bool     stable;        // debounced state, true = pressed
-  bool     last;          // last raw read
-  unsigned long changed;  // when the raw read last differed
-};
+// Button is defined in Types.h.
 
 static Button g_btnExtend  = {PIN_BTN_EXTEND,  false, false, 0};
 static Button g_btnRetract = {PIN_BTN_RETRACT, false, false, 0};
