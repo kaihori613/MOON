@@ -551,7 +551,9 @@ void beginJog(int8_t dir, uint16_t ms) {
 
 static Button g_btnExtend  = {PIN_BTN_EXTEND,  false, false, 0};
 static Button g_btnRetract = {PIN_BTN_RETRACT, false, false, 0};
+#if USE_STOP_BUTTON
 static Button g_btnStop    = {PIN_BTN_STOP,    false, false, 0};
+#endif
 
 // Returns true on the rising edge of a debounced press.
 bool buttonPoll(Button &b) {
@@ -765,7 +767,11 @@ static int8_t g_manualDir = 0;
 // Called every tick, ahead of the state machine, so a press pre-empts
 // whatever else was running. Returns true if the buttons now own the axis.
 bool handleButtons() {
+#if USE_STOP_BUTTON
   const bool stopEdge    = buttonPoll(g_btnStop);
+#else
+  const bool stopEdge    = false;     // no stop button; the kill switch stops
+#endif
   const bool extendEdge  = buttonPoll(g_btnExtend);
   const bool retractEdge = buttonPoll(g_btnRetract);
 
@@ -895,7 +901,7 @@ void printHelp() {
   Serial.println(F("  e <ms>     open-loop jog   r <ms>"));
   Serial.println(F("  m          monitor raw encoder (check mounting/invert)"));
   Serial.println(F("  z          set zero here"));
-  Serial.println(F("  (panel)    hold extend/retract to jog; STOP aborts anything"));
+  Serial.println(F("  (panel)    hold extend/retract to jog; KILL stops anything"));
   Serial.println(F("  h          cross the reference switch, report drift"));
   Serial.println(F("  H          cross it and ADOPT the crossings as zero"));
   Serial.println(F("  p/i/d/f <v> set kp/ki/kd/kff live"));
@@ -1059,7 +1065,9 @@ void setup() {
 #if USE_BUTTONS
   pinMode(PIN_BTN_EXTEND,  INPUT_PULLUP);
   pinMode(PIN_BTN_RETRACT, INPUT_PULLUP);
+#if USE_STOP_BUTTON
   pinMode(PIN_BTN_STOP,    INPUT_PULLUP);
+#endif
 #endif
 #if USE_KILL
   pinMode(PIN_KILL,        INPUT_PULLUP);

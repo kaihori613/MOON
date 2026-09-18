@@ -30,19 +30,32 @@ L298N is a 2 A part with a 2–3 V drop being asked to run a jack at 25 V.
 |---|---|---|
 | D0, D1 | USB serial | Console, and the target-angle channel from the host |
 | D2 | Reed switch | **INT0.** Health witness — nothing integrates it any more |
-| D3 | Limit flag, +15° | Cam pole B, NC to GND, `INPUT_PULLUP` |
-| D4 | Limit flag, −15° | Cam pole B, NC to GND, `INPUT_PULLUP` |
+| D3 | Extend button | NO to GND. Same pin as v1 and `reed_switch_test` |
+| D4 | Retract button | NO to GND. Same pin as v1 and `reed_switch_test` |
 | D5 · D6 · D9 | L298N channel A — **dead** | Held LOW from the first line of `setup()`. OUT1/OUT2 stay unconnected |
-| D7 | **Kill switch** | E-stop pole 2, NC to GND, `INPUT_PULLUP` |
+| D7 | **Kill switch** | E-stop pole 2, NC to GND |
 | D8 | L298N **IN3** | `digitalWrite` only, never PWM |
 | D10 | L298N **ENB** | PWM, Timer1 |
 | D11 | Buzzer | Via a transistor |
 | D12 | L298N **IN4** | `digitalWrite` only, never PWM |
-| A0 · A1 · A2 | Extend · retract · stop buttons | NO to GND, `INPUT_PULLUP` |
-| A3 | **Reference switch** | Mid-travel, NO to GND. Not a stop — see below. **Not fitted yet**. Also the G2's current sense, so not both |
+| A0 | Limit switch 1, +15° | Cam pole B, NC to GND. The cam reached while **extending** — check it, see below |
+| A1 | Limit switch 2, −15° | Cam pole B, NC to GND |
+| A2 | **Home (reference) switch** | Mid-travel, NO to GND. Not a stop — see below. `USE_REF_SWITCH 1` |
+| A3 | free | The G2's current sense if that driver is ever fitted |
 | A4 | I2C SDA | AS5600 at 0x36, through a level shifter |
 | A5 | I2C SCL | " |
 | D13 | free | Carries the on-board LED |
+
+Every switch input uses the filter in *Switch inputs* below, and
+`INPUT_PULLUP` stays on as well. There is no separate stop button; the kill
+switch stops everything. `USE_STOP_BUTTON` puts one on A3 if it is ever added.
+
+**Check which cam is which before any powered move.** Trip each cam by hand
+and send `s`: the extend-side cam must light the `+` in `lim=`. If it lights
+the `-`, swap `PIN_LIM_POS` and `PIN_LIM_NEG` in `Config.h`. Swapped, the
+firmware blocks the direction that escapes a cam and allows the one that
+drives further in — the hardware contact still cuts the motor, but the
+firmware is then fighting it.
 
 **I2C is A4/A5 and cannot be moved.** `Wire` on a 328P is tied to that
 peripheral. An encoder on any other pin will not enumerate.
@@ -165,7 +178,7 @@ rather than as permission to keep going.
 
 **Each cam needs two contacts** — a DPDT microswitch, or two switches on one
 lobe. Pole A is the NC contact in the motor lead above. Pole B is a second NC
-contact from D3 (+15°) or D4 (−15°) to GND, so the firmware knows which cam
+contact from A0 (+15°) or A1 (−15°) to GND, so the firmware knows which cam
 tripped. One SPDT cannot do both: its spare contact is NO, and a broken wire
 on an NO flag reads as "not at the limit". Pole A breaks full motor current at
 25 V DC, so check the switch's **DC** rating, not the AC figure on its body.
@@ -182,7 +195,14 @@ onto each cam slowly and confirm you can still drive off it.
 
 ## The reference switch — designed, probably not needed
 
-`USE_REF_SWITCH` is `0`, and the honest recommendation is to leave it there.
+**This bench has one fitted, as the home switch on A2, so `USE_REF_SWITCH`
+is now `1`.** It does nothing until asked: `h` crosses it and reports drift,
+`H` crosses it and adopts the crossing as zero, then `w` saves. Set
+`REF_ANGLE_DEG` to where it really sits before trusting `H`. The case below
+for leaving it out still stands; it is kept for why the switch is a check,
+not a necessity.
+
+The original recommendation was to leave `USE_REF_SWITCH` at `0`.
 
 The case for it was that the encoder's zero can creep with no symptom: zero is
 a raw count in EEPROM, and a magnet slipping on its hub makes every angle wrong
@@ -313,6 +333,32 @@ on the bench and under `REED_DEBOUNCE_US = 3000`.
 Keep `INPUT_PULLUP` set regardless: it costs nothing and a disconnected reed
 then reads high rather than floating.
 
+## Switch inputs
+
+Every switch gets the same filter as the reed, fitted at the **Arduino end**
+of its cable — the long wire is what picks up motor noise, so the filter has
+to sit where the pin reads it:
+
+- 4.7 kΩ pull-up from the pin to 5 V
+- 100 nF from the pin to GND
+- 220 Ω in series between the pin and the cable to the switch
+
+| Pin | Switch | Contact |
+|---|---|---|
+| D3 | Extend button | NO |
+| D4 | Retract button | NO |
+| D7 | Kill (E-stop pole 2) | NC |
+| A0 | Limit switch 1, +15° (cam pole B) | NC |
+| A1 | Limit switch 2, −15° (cam pole B) | NC |
+| A2 | Home (reference) switch | NO |
+
+Closed, the pin sits at about 0.2 V (5 V × 220 / 4920), a solid LOW. It falls
+in about 20 µs and rises in about 0.5 ms, so the kill switch and the cams
+still act at once and the buttons' 25 ms debounce is untouched. The 220 Ω also
+limits the capacitor's discharge through the contacts and protects the pin
+from a spike on an outdoor wire. Return each switch to the **Arduino's** GND,
+never the driver's.
+
 ## Capacitors
 
 Four that matter, six to do it properly. **The voltage ratings are not
@@ -357,7 +403,7 @@ Through a small NPN — 2N3904 or BC547, 1 kΩ from the pin to the base, emitter
 to GND, buzzer between 5 V and the collector, and a 1N4148 across it if it is
 magnetic. Direct off the pin only for a bare piezo under 10 mA.
 
-`tone()` is safe here: it owns Timer2, which drives PWM on D3 and D11, and
+`tone()` is safe here: it owns Timer2, which drives PWM on D3 (an input here) and D11, and
 motor PWM is Timer1 on D10 (D9 on the G2). `USE_BUZZER` is on, and
 the patterns are one short beep at a good boot, two short beeps when a
 reference pass finishes, and three long beeps on any fault, the kill switch

@@ -71,11 +71,11 @@ should be running right now.
 
 `actuator_v2/` (closed loop on the pivot via the AS5600, cam microswitches at
 ±15°) and [WIRING.md](WIRING.md) came in with it; its README is kept whole at
-[docs/actuator-v2-readme.md](docs/actuator-v2-readme.md). **WIRING.md
-describes v2's panel pins, not the bench's** — the bench is still buttons on
-D3/D4 and kill on D7, per `actuator_v1/Config.h`. Both run the motor on
-channel B, and both read the kill switch on D7; v2's buttons are on A0–A2 and
-its ±15° cam flags take D3/D4, so rewire those before flashing v2.
+[docs/actuator-v2-readme.md](docs/actuator-v2-readme.md). WIRING.md's pin
+map is the bench as wired: extend/retract buttons on D3/D4 and kill on D7
+(the same pins as `actuator_v1` and `reed_switch_test`), ±15° cam flags on
+A0/A1, the home switch on A2, the motor on L298N channel B. v1 and
+`reed_switch_test` simply ignore A0–A2.
 
 ### The three documents that matter
 

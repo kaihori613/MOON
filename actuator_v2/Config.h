@@ -83,7 +83,7 @@
 
 // Current sense. The G2 provides one; the L298N module's sense pins are
 // usually jumpered to ground, so leave USE_CURRENT_LIMIT off with it. A3 is
-// shared with the reference switch -- see PIN_REF below.
+// otherwise free on this panel.
 const uint8_t PIN_CS = A3;
 
 // ===========================================================================
@@ -116,23 +116,28 @@ const uint8_t PIN_CS = A3;
 // section 5. Nothing here integrates it.
 const uint8_t PIN_REED = 2;
 
-// Limit cams at the pivot. NC to GND with INPUT_PULLUP, so a broken wire
-// reads as TRIPPED rather than as permission to keep going. These also cut
-// motor current in hardware; the pins only tell the firmware what the wiring
-// has already done.
-const uint8_t PIN_LIM_POS = 3;
-const uint8_t PIN_LIM_NEG = 4;
+// Limit cams at the pivot -- "limit switch 1" on A0, "limit switch 2" on A1.
+// NC to GND with INPUT_PULLUP, so a broken wire reads as TRIPPED rather than
+// as permission to keep going. These also cut motor current in hardware; the
+// pins only tell the firmware what the wiring has already done.
+//
+// POS is the cam the boom reaches while EXTENDING. Check it before any powered
+// move: trip each cam by hand and watch 'lim=' in 's' -- the + must light for
+// the extend-side cam. If it is the other way round, swap these two numbers.
+const uint8_t PIN_LIM_POS = A0;
+const uint8_t PIN_LIM_NEG = A1;
 
-// Reference switch, mid-travel. NOT one of the hard stops -- see section 4b
-// for why that distinction is the whole point. A3, because D10 is now the
-// L298N's ENB and a pin map that only works on one driver is a trap. A3 is
-// free on both drivers unless the G2's current sense is in use; the #error
-// below catches that. NOT FITTED YET: USE_REF_SWITCH is 0 in section 4b.
-const uint8_t PIN_REF = A3;
+// Reference ("home") switch, mid-travel, on A2. NOT one of the hard stops --
+// see section 4b for why that distinction is the whole point. NO to GND.
+const uint8_t PIN_REF = A2;
 
-const uint8_t PIN_BTN_EXTEND  = A0;
-const uint8_t PIN_BTN_RETRACT = A1;
-const uint8_t PIN_BTN_STOP    = A2;
+// Panel buttons on the pins v1 and reed_switch_test use, so the bench does not
+// have to be rewired between sketches. There is no separate STOP button on
+// this panel; the kill switch on D7 stops everything.
+const uint8_t PIN_BTN_EXTEND  = 3;
+const uint8_t PIN_BTN_RETRACT = 4;
+#define USE_STOP_BUTTON 0
+const uint8_t PIN_BTN_STOP    = A3;     // only read when USE_STOP_BUTTON is 1
 const uint8_t PIN_BUZZER      = 11;
 
 // KILL SWITCH on D7, the pin v1 uses. It is a latching fault: the motor stops
@@ -158,7 +163,7 @@ const uint8_t PIN_KILL = 7;
 #define USE_BUTTONS 1
 
 // BUZZER on D11 through an NPN (WIRING.md). tone() owns Timer2, which only
-// costs PWM on D3 and D11 -- D3 is a limit input, so nothing is lost; the
+// costs PWM on D3 and D11 -- D3 is a button input, so nothing is lost; the
 // motor PWM is Timer1. Three sounds, none of which ever blocks the loop:
 //   one short    booted and the encoder answered
 //   two short    reference pass finished (the "homing" pass, 'h' / 'H')
@@ -303,10 +308,14 @@ const float SOFT_LIMIT_DEG = 13.0f;   // where the firmware refuses to go
 //  and "move 3 degrees" still means three degrees. What is arbitrary is only
 //  the LABEL on the scale -- 0.0 means wherever the boom was when 'z' was
 //  typed. Pointing at a geostationary bird needs only the relative part.
-#define USE_REF_SWITCH 0
+//
+//  THIS BENCH HAS ONE FITTED -- the "home switch" on A2 -- so it is on. It
+//  does nothing until asked: 'h' crosses it and reports drift, 'H' crosses it
+//  and adopts the crossing as zero, then 'w' saves. Set REF_ANGLE_DEG to
+//  where the switch actually sits before trusting 'H'.
+#define USE_REF_SWITCH 1
 
-// Only read when USE_REF_SWITCH is 1. Kept so the branch still compiles and
-// so the numbers are not lost if a reason to fit the switch ever appears.
+// Only read when USE_REF_SWITCH is 1.
 const float REF_ANGLE_DEG  = -5.0f;    // PLACEHOLDER  where the switch sits
 const float REF_MARGIN_DEG =  1.5f;    // how far clear of it a pass starts
 
@@ -360,8 +369,8 @@ const unsigned long MAX_RUN_MS = 30000;
 #define USE_CURRENT_LIMIT 0
 const uint16_t CURRENT_TRIP_ADC = 700;   // PLACEHOLDER raw ADC counts
 
-#if USE_CURRENT_LIMIT && USE_REF_SWITCH
-  #error "A3 cannot be both the current sense and the reference switch -- move PIN_REF"
+#if USE_CURRENT_LIMIT && USE_STOP_BUTTON
+  #error "A3 cannot be both the current sense and the stop button -- move PIN_BTN_STOP"
 #endif
 
 // ===========================================================================
