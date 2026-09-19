@@ -30,6 +30,12 @@ const bool    IS_LIMIT[N] = {false, false, false, true, true, true};
 
 const uint8_t DEBOUNCE_MS = 20;
 
+// The home switch gets one long beep when it is pressed, so it can be told
+// apart from everything else by ear. Nothing interrupts it once it starts.
+const uint8_t  HOME = 5;              // index of A2 in PINS
+const uint16_t HOME_BEEP_MS = 2000;
+static unsigned long g_longBeepUntil = 0;
+
 static bool          g_stable[N];     // debounced raw level, true = HIGH
 static bool          g_raw[N];
 static unsigned long g_changed[N];
@@ -138,7 +144,14 @@ void loop() {
     g_stable[i] = raw;
     if (isActive(i)) g_count[i]++;
     printInput(i);
-    // High note going active, low note going back.
-    tone(PIN_BUZZER, isActive(i) ? 2000 : 1000, 60);
+
+    if (i == HOME && isActive(i)) {
+      tone(PIN_BUZZER, 2000, HOME_BEEP_MS);
+      g_longBeepUntil = now + HOME_BEEP_MS;
+    } else if (i != HOME && (long)(now - g_longBeepUntil) >= 0) {
+      // High note going active, low note going back -- unless the home beep
+      // is still sounding, which a short one would cut off.
+      tone(PIN_BUZZER, isActive(i) ? 2000 : 1000, 60);
+    }
   }
 }
