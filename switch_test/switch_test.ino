@@ -55,6 +55,7 @@ const uint16_t EXTEND_HZ  = 2000;
 const uint16_t RETRACT_HZ = 1300;
 static unsigned long g_shortUntil = 0;    // end of the current timed beep
 static uint16_t      g_holdHz = 0;        // held tone now playing, 0 = none
+static bool          g_pressedByEdge[N];  // went active by a real press, not at boot
 
 static bool          g_stable[N];     // debounced raw level, true = HIGH
 static bool          g_raw[N];
@@ -156,16 +157,14 @@ void restCheck(unsigned long now) {
 }
 
 // Keeps the extend / retract tone going while one is held, and silences it
-// on release. Only after READY: before that a miswired button can read as
-// held with nobody touching it, and would drone the whole time.
+// on release. Only for a press that was SEEN happening: a miswired button
+// that reads as held from power-up would otherwise drone the whole time.
 void holdToneTick(unsigned long now) {
   if ((long)(now - g_longBeepUntil) < 0 || (long)(now - g_shortUntil) < 0) return;
 
   uint16_t want = 0;
-  if (g_ready) {
-    if      (isActive(EXTEND))  want = EXTEND_HZ;
-    else if (isActive(RETRACT)) want = RETRACT_HZ;
-  }
+  if      (isActive(EXTEND)  && g_pressedByEdge[EXTEND])  want = EXTEND_HZ;
+  else if (isActive(RETRACT) && g_pressedByEdge[RETRACT]) want = RETRACT_HZ;
   if (want == g_holdHz) return;
   if (want) tone(PIN_BUZZER, want);
   else      noTone(PIN_BUZZER);
@@ -196,6 +195,7 @@ void setup() {
     g_raw[i] = g_stable[i] = digitalRead(PINS[i]);
     g_changed[i] = now;
     g_count[i] = 0;
+    g_pressedByEdge[i] = false;
   }
 
   Serial.begin(115200);
@@ -226,6 +226,7 @@ void loop() {
 
     g_stable[i] = raw;
     g_lastChange = now;
+    g_pressedByEdge[i] = isActive(i);
     if (g_ready && isActive(i)) g_count[i]++;
     printInput(i);
 
