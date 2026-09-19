@@ -12,6 +12,8 @@
 //       READY and beeps.
 //    2. PRESS TEST. One line and a beep each time any input changes, so you
 //       can trip a limit switch out at the pivot and hear it from the bench.
+//       Extend and retract instead sound for as long as they are held --
+//       extend higher, retract lower. The home switch gives one 2 s beep.
 //       Presses are counted only from READY on.
 //
 //  Send any character to reprint everything and run the rest check again.
@@ -44,6 +46,15 @@ const uint16_t REST_QUIET_MS = 1000;  // how long everything must read right
 const uint8_t  HOME = 5;              // index of A2 in PINS
 const uint16_t HOME_BEEP_MS = 2000;
 static unsigned long g_longBeepUntil = 0;
+
+// Extend and retract sound continuously while held, at different pitches so
+// they can be told apart by ear. Any timed beep (home, the short ones, READY)
+// takes over while it plays, and the held tone comes back after it.
+const uint8_t  EXTEND = 0, RETRACT = 1;   // indexes in PINS
+const uint16_t EXTEND_HZ  = 2000;
+const uint16_t RETRACT_HZ = 1300;
+static unsigned long g_shortUntil = 0;    // end of the current timed beep
+static uint16_t      g_holdHz = 0;        // held tone now playing, 0 = none
 
 static bool          g_stable[N];     // debounced raw level, true = HIGH
 static bool          g_raw[N];
@@ -136,8 +147,29 @@ void restCheck(unsigned long now) {
     Serial.println(F("READY -- every input reads right at rest."));
     Serial.println(F("Now press each button and trip each switch, one at a time."));
     Serial.println();
-    if ((long)(now - g_longBeepUntil) >= 0) tone(PIN_BUZZER, 1500, 300);
+    if ((long)(now - g_longBeepUntil) >= 0) {
+      tone(PIN_BUZZER, 1500, 300);
+      g_shortUntil = now + 300;
+      g_holdHz = 0;
+    }
   }
+}
+
+// Keeps the extend / retract tone going while one is held, and silences it
+// on release. Only after READY: before that a miswired button can read as
+// held with nobody touching it, and would drone the whole time.
+void holdToneTick(unsigned long now) {
+  if ((long)(now - g_longBeepUntil) < 0 || (long)(now - g_shortUntil) < 0) return;
+
+  uint16_t want = 0;
+  if (g_ready) {
+    if      (isActive(EXTEND))  want = EXTEND_HZ;
+    else if (isActive(RETRACT)) want = RETRACT_HZ;
+  }
+  if (want == g_holdHz) return;
+  if (want) tone(PIN_BUZZER, want);
+  else      noTone(PIN_BUZZER);
+  g_holdHz = want;
 }
 
 void startRestCheck() {
@@ -200,12 +232,19 @@ void loop() {
     if (i == HOME && isActive(i)) {
       tone(PIN_BUZZER, 2000, HOME_BEEP_MS);
       g_longBeepUntil = now + HOME_BEEP_MS;
-    } else if (i != HOME && (long)(now - g_longBeepUntil) >= 0) {
+      g_holdHz = 0;
+    } else if (i == HOME || i == EXTEND || i == RETRACT) {
+      // Home's release is silent so it cannot cut the 2 s beep short;
+      // extend and retract are handled by holdToneTick().
+    } else if ((long)(now - g_longBeepUntil) >= 0) {
       // High note going active, low note going back -- unless the home beep
       // is still sounding, which a short one would cut off.
       tone(PIN_BUZZER, isActive(i) ? 2000 : 1000, 60);
+      g_shortUntil = now + 60;
+      g_holdHz = 0;
     }
   }
 
   if (!g_ready) restCheck(now);
+  holdToneTick(now);
 }
