@@ -67,6 +67,7 @@ should be running right now.
 | `as5600_simple/` | run first: 9600 baud, no commands, bus scan, explains a silent bus |
 | `as5600_characterise/` | air gap (AGC), noise floor, averaging depth, drift — numbers for Config.h |
 | `as5600_test/` | magnet check, count direction, wrap check for `actuator_v2` |
+| `switch_test/` | buttons, ±15° limits and home switch: prints and beeps on every change, bridge held off |
 | `archive/cam_switch_test/` | the old cam end-stop repeatability test, restored from history |
 
 `actuator_v2/` (closed loop on the pivot via the AS5600, cam microswitches at
