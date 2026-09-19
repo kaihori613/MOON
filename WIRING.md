@@ -332,6 +332,13 @@ limits the capacitor's discharge through the contacts and protects the pin
 from a spike on an outdoor wire. Return each switch to the **Arduino's** GND,
 never the driver's.
 
+`actuator_v2` adds a software filter behind this, not instead of it. A limit
+must read tripped for `LIMIT_TRIP_MS` (2 ms) to count, and clear for
+`LIMIT_CLEAR_MS` (20 ms) before a tripped limit is believed clear again; the
+home switch must hold `REF_STABLE_MS` (2 ms) either way. The buttons already
+need 25 ms steady. The kill button is left unfiltered on purpose: it acts on
+the first reading, because a false kill only stops the motor.
+
 ## Capacitors
 
 Four that matter, six to do it properly. **The voltage ratings are not

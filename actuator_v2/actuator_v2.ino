@@ -151,24 +151,72 @@ float positionDeg() {
 //  the other way round, and a broken wire looks like "not at the limit".
 
 #if LIMITS_NORMALLY_CLOSED
-bool limitPos() { return digitalRead(PIN_LIM_POS) == HIGH; }
-bool limitNeg() { return digitalRead(PIN_LIM_NEG) == HIGH; }
+bool rawLimitPos() { return digitalRead(PIN_LIM_POS) == HIGH; }
+bool rawLimitNeg() { return digitalRead(PIN_LIM_NEG) == HIGH; }
 #else
-bool limitPos() { return digitalRead(PIN_LIM_POS) == LOW; }
-bool limitNeg() { return digitalRead(PIN_LIM_NEG) == LOW; }
+bool rawLimitPos() { return digitalRead(PIN_LIM_POS) == LOW; }
+bool rawLimitNeg() { return digitalRead(PIN_LIM_NEG) == LOW; }
 #endif
 
-// The reference switch carries no safety duty, so unlike the cams it is wired
-// only to this pin -- nothing it does interrupts motor current. Active LOW to
-// GND with INPUT_PULLUP, same as everything else here.
+// The reference switch carries no safety duty, and like the limits it is
+// wired only to its pin -- nothing it does interrupts motor current. Active
+// LOW to GND with INPUT_PULLUP, same as everything else here.
 #if USE_REF_SWITCH
-bool refActive() { return digitalRead(PIN_REF) == LOW; }
+bool rawRefActive() { return digitalRead(PIN_REF) == LOW; }
 #else
-bool refActive() { return false; }        // not fitted
+bool rawRefActive() { return false; }     // not fitted
 #endif
+
+// Glitch filter, sampled on every pass of loop() rather than every control
+// tick, so a real change is seen within a couple of milliseconds. A reading
+// only becomes the filtered state once it has held for its time in Config.h;
+// a spike shorter than that never gets through. See LIMIT_TRIP_MS.
+const uint8_t IN_LIM_POS = 0, IN_LIM_NEG = 1, IN_REF = 2, IN_COUNT = 3;
+static bool          g_inState[IN_COUNT];   // filtered: true = tripped / active
+static bool          g_inRaw[IN_COUNT];     // last raw reading
+static unsigned long g_inSince[IN_COUNT];   // when the raw reading last changed
+
+bool readInputRaw(uint8_t i) {
+  switch (i) {
+    case IN_LIM_POS: return rawLimitPos();
+    case IN_LIM_NEG: return rawLimitNeg();
+    default:         return rawRefActive();
+  }
+}
+
+void filterInput(uint8_t i, unsigned long now, uint8_t onMs, uint8_t offMs) {
+  const bool raw = readInputRaw(i);
+  if (raw != g_inRaw[i]) { g_inRaw[i] = raw; g_inSince[i] = now; }
+  if (raw != g_inState[i] && now - g_inSince[i] >= (raw ? onMs : offMs)) {
+    g_inState[i] = raw;
+  }
+}
+
+void pollInputs() {
+  const unsigned long now = millis();
+  filterInput(IN_LIM_POS, now, LIMIT_TRIP_MS, LIMIT_CLEAR_MS);
+  filterInput(IN_LIM_NEG, now, LIMIT_TRIP_MS, LIMIT_CLEAR_MS);
+  filterInput(IN_REF,     now, REF_STABLE_MS, REF_STABLE_MS);
+}
+
+// At boot, trust what the pins say: a limit that is already tripped must
+// count as tripped from the very first tick, not 2 ms later.
+void initInputs() {
+  const unsigned long now = millis();
+  for (uint8_t i = 0; i < IN_COUNT; i++) {
+    g_inRaw[i] = g_inState[i] = readInputRaw(i);
+    g_inSince[i] = now;
+  }
+}
+
+bool limitPos()  { return g_inState[IN_LIM_POS]; }
+bool limitNeg()  { return g_inState[IN_LIM_NEG]; }
+bool refActive() { return g_inState[IN_REF]; }
 
 // Kill switch. See Config.h: it latches a fault, and it is a request to the
-// firmware, not a power cut.
+// firmware, not a power cut. Deliberately NOT filtered, as in v1 and
+// reed_switch_test: it acts on the first sample. A spike can only stop the
+// motor, which is the safe direction to be wrong in.
 #if USE_KILL
 bool killAsserted() {
 #if KILL_IS_NORMALLY_CLOSED
@@ -1082,6 +1130,11 @@ void setup() {
   pinMode(PIN_BUZZER, OUTPUT);
 #endif
 
+  // Let the pull-ups charge the 100 nF filter caps before the first reading:
+  // an uncharged cap reads LOW, and an NC limit that reads LOW looks clear.
+  delay(10);
+  initInputs();
+
   attachInterrupt(digitalPinToInterrupt(PIN_REED), onReedEdge, FALLING);
 
   Serial.begin(115200);
@@ -1127,6 +1180,7 @@ void setup() {
 }
 
 void loop() {
+  pollInputs();   // every pass, not every tick -- see filterInput()
   pollSerial();
   buzzerTick();
 

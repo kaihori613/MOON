@@ -125,6 +125,17 @@ const uint8_t PIN_REED = 2;
 // to 0 if they are wired COM-NO, and know that a broken wire then silently
 // removes that limit.
 #define LIMITS_NORMALLY_CLOSED 1
+
+// Software glitch filter on the limit and home switches -- the second half of
+// the RC filter in WIRING.md, not a replacement for it. The limits are
+// deliberately lopsided: a trip must hold LIMIT_TRIP_MS to count, but a
+// tripped limit must read clear for LIMIT_CLEAR_MS before it is believed.
+// A spike on the cable can then neither fake a trip nor, worse, make a
+// tripped limit look clear for an instant. Both are far below anything the
+// boom does in a 20 ms tick.
+const uint8_t LIMIT_TRIP_MS  = 2;
+const uint8_t LIMIT_CLEAR_MS = 20;
+const uint8_t REF_STABLE_MS  = 2;       // home switch, both ways
 //
 // POS is the switch the boom reaches while EXTENDING. Check it before any
 // powered move: trip each by hand and watch 'lim=' in 's' -- the + must light
