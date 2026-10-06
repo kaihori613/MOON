@@ -275,6 +275,10 @@ void motorOff() {
   digitalWrite(PIN_ENA, LOW);        // detach the PWM, whichever timer drove it
   digitalWrite(PIN_IN1, LOW);        // and coast rather than brake
   digitalWrite(PIN_IN2, LOW);
+#elif MOTOR_DRIVER == DRV_HW039
+  digitalWrite(PIN_RPWM, LOW);       // detach both PWMs before dropping EN,
+  digitalWrite(PIN_LPWM, LOW);       // same order as the L298N branch
+  digitalWrite(PIN_EN,   LOW);
 #else
   analogWrite(PIN_PWM, 0);
   digitalWrite(PIN_PWM, LOW);
@@ -315,6 +319,18 @@ void driveSigned(int duty) {
   digitalWrite(PIN_IN1, sign > 0 ? HIGH : LOW);
   digitalWrite(PIN_IN2, sign > 0 ? LOW  : HIGH);
   analogWrite(PIN_ENA, (uint8_t)abs(duty));
+#elif MOTOR_DRIVER == DRV_HW039
+  // Idle side hard off before the driven side goes anywhere near on -- RPWM
+  // and LPWM both live is the state that fights the motor against itself.
+  if (sign > 0) {
+    digitalWrite(PIN_LPWM, LOW);
+    digitalWrite(PIN_EN,   HIGH);
+    analogWrite(PIN_RPWM, (uint8_t)abs(duty));
+  } else {
+    digitalWrite(PIN_RPWM, LOW);
+    digitalWrite(PIN_EN,   HIGH);
+    analogWrite(PIN_LPWM, (uint8_t)abs(duty));
+  }
 #else
   digitalWrite(PIN_SLP, HIGH);
   digitalWrite(PIN_DIR, sign > 0 ? HIGH : LOW);
@@ -1101,6 +1117,13 @@ void setup() {
   digitalWrite(PIN_ENA, LOW);
   digitalWrite(PIN_IN1, LOW);
   digitalWrite(PIN_IN2, LOW);
+#elif MOTOR_DRIVER == DRV_HW039
+  pinMode(PIN_RPWM, OUTPUT);
+  pinMode(PIN_LPWM, OUTPUT);
+  pinMode(PIN_EN,   OUTPUT);
+  digitalWrite(PIN_RPWM, LOW);
+  digitalWrite(PIN_LPWM, LOW);
+  digitalWrite(PIN_EN,   LOW);
 #else
   pinMode(PIN_PWM, OUTPUT);
   pinMode(PIN_DIR, OUTPUT);

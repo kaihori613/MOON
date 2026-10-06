@@ -14,7 +14,7 @@ is still in git history and `actuator_v1/` still runs it.
 |---|---|---|
 | Position | reed pulses, signed by commanded direction | AS5600 absolute angle on the pivot |
 | Homing | drive into the retract cam every boot, required before any move | no homing; a separate mid-travel reference switch checks the stored zero |
-| Bridge | L298N | still the L298N on the bench; `MOTOR_DRIVER` selects the G2 when it arrives |
+| Bridge | L298N | L298N channel B **burned** (see below); the bench now runs a BTS7960 module ("HW-039"), `MOTOR_DRIVER` selects the G2 when it arrives |
 | Reed | the position sensor | motion witness only |
 | IMU | MPU6050 planned | dropped |
 | Limits | actuator's internal cams only | ±15° limit switches read by the firmware, plus the actuator's own cams |
@@ -32,12 +32,13 @@ L298N is a 2 A part with a 2–3 V drop being asked to run a jack at 25 V.
 | D2 | Reed switch | **INT0.** Health witness — nothing integrates it any more |
 | D3 | Extend button | Push button, NO to GND. Same pin as v1 and `reed_switch_test` |
 | D4 | Retract button | Push button, NO to GND. Same pin as v1 and `reed_switch_test` |
-| D5 · D6 · D9 | L298N channel A — **dead** | Held LOW from the first line of `setup()`. OUT1/OUT2 stay unconnected |
+| D5 · D6 · D9 | *(L298N channel A — dead, retired with the rest of that module)* | no longer wired; D9 is now HW-039 `RPWM` |
 | D7 | **Kill button** | Push button, NO to GND. Latches; release, then `k` |
-| D8 | L298N **IN3** | `digitalWrite` only, never PWM |
-| D10 | L298N **ENB** | PWM, Timer1 |
+| D8 | HW-039 **EN** (R_EN + L_EN tied together) | `digitalWrite` only, HIGH to enable |
+| D9 | HW-039 **RPWM** (extend) | PWM, Timer1 |
+| D10 | HW-039 **LPWM** (retract) | PWM, Timer1 |
 | D11 | Buzzer | Via a transistor |
-| D12 | L298N **IN4** | `digitalWrite` only, never PWM |
+| D12 | *(L298N IN4 — unused now)* | free, since the L298N is off the board |
 | A0 | Limit switch 1, +15° | Microswitch COM–NC to GND, signal only. The one reached while **extending** — check it, see below |
 | A1 | Limit switch 2, −15° | Microswitch COM–NC to GND, signal only |
 | A2 | **Home (reference) switch** | Mid-travel, NO to GND. Not a stop — see below. `USE_REF_SWITCH 1` |
@@ -60,41 +61,59 @@ of the actuator's internal cams.
 **I2C is A4/A5 and cannot be moved.** `Wire` on a 328P is tied to that
 peripheral. An encoder on any other pin will not enumerate.
 
-`MOTOR_DRIVER` in `Config.h` picks the pin set. It defaults to `DRV_L298N` on
-channel B (`L298N_CHANNEL 2`), the same pins v1 and `reed_switch_test` use —
-channel A on this module has a shorted high side, see the README. `DRV_G2`
-switches to the Pololu's two-pin interface: PWM on D9, DIR on D12, `/SLP` on
-D8. D7 stays the kill input on both drivers.
-
-**Take the ENA and ENB jumpers off the module.** They tie the enables to 5 V.
-With the ENA jumper on, holding D9 low does nothing, and the shorted high side
-becomes a short across the 25 V rail the first time IN1 goes low.
+`MOTOR_DRIVER` in `Config.h` picks the pin set, and now defaults to
+`DRV_HW039`: `RPWM` on D9, `LPWM` on D10, a single `EN` on D8 wired to both
+the module's R_EN and L_EN. `DRV_G2` switches to the Pololu's two-pin
+interface: PWM on D9, DIR on D12, `/SLP` on D8 — note D9 and D8 are shared
+with the HW-039 pin set, so only one driver's wiring should be on the header
+at a time. `DRV_L298N` still exists in `Config.h` for reference but channel B
+is now also dead — see below. D7 stays the kill input on every driver.
 
 `/SLP` is the pin most easily forgotten on the G2. It boots asleep, and a
 perfectly correct PWM into a sleeping bridge moves nothing while looking
 exactly like a dead motor. `actuator_v2` drives it low in `setup()` and only
 raises it inside `driveSigned()`, so it doubles as the hard off switch.
 
-### Running the L298N at 25 V
+### The L298N is retired — both channels are now dead
 
-It is inside the part's voltage rating — Vs goes to 46 V — so the volts are
-not the problem. Three other things are, and all are survivable for bring-up
-because the duty cycle is tiny: a move takes seconds and then the dish sits
-for hours, so thermal mass matters more than the continuous rating.
+Channel A died first (shorted high side, see the README). Channel B, the
+spare this board moved to, has now burned too. Do not reconnect this module
+without a fresh board.
 
-1. **Current.** 2 A per channel. On a healthy module the two bridges can be
-   paralleled for about 4 A. **Not on this one:** channel A's high side is
-   shorted, and joining OUT1 to OUT3 would put that short on the motor lead.
-   This board runs channel B alone, so 2 A is the ceiling.
-2. **Heat.** The outputs are Darlingtons and drop 2–3 V regardless of load. At
-   3 A that is ~7 W in the package, and the postage-stamp heatsink on the red
-   modules will not carry it. Fit a real one.
-3. **The drop comes off the motor.** 25 V in, roughly 22 V at the actuator.
-   Harmless, but the duty numbers found during tuning will not transfer
-   unchanged to a MOSFET bridge later.
+It is inside the part's voltage rating — Vs goes to 46 V — so the volts were
+never the problem. What killed it was current and heat on a 2 A/channel part
+asked to run a jack at 25 V: ~7 W in the package on a postage-stamp heatsink,
+with the reversal in `REVERSE_DEAD_MS` putting back-EMF through it on every
+direction change. **Measure the stall current before trusting any bridge at
+this rail voltage** — it is likely well over the 2 A this part could survive.
 
-**Measure the stall current before deciding this is fine.** Over about 3 A
-even paralleled and the L298N is the wrong part.
+### Running the HW-039 (BTS7960) at 25 V — read this before wiring it in
+
+This WIRING.md previously passed on the BTS7960 for exactly this rail: it is
+**specified only to ~27 V**, which leaves almost no headroom above a 25 V
+supply once reversal kickback is added in. That reasoning has not changed —
+switching to it was a reaction to the L298N burning, not a re-evaluation of
+the voltage margin. Before trusting this part at 25 V:
+
+1. **Confirm the rail against the actuator's plate.** If it reads less than
+   25 V (many TVRO actuators are 24 V nominal), the margin opens up
+   meaningfully.
+2. **Keep `REVERSE_DEAD_MS` (Config.h) and the coast-not-brake behavior in
+   `motorOff()`.** Both exist to keep the bridge from ever seeing a reversal
+   with current still flowing; removing either raises the voltage spike this
+   part has the least room to absorb.
+3. **Fit a flyback/TVS clamp across the motor terminals** if one is not
+   already on the actuator leads — the module's own protection is not
+   generous at this rail.
+4. **Measure the stall current and watch the module's heatsink temperature**
+   on the first several moves, the same way the L298N bring-up should have
+   been watched. 43 A-rated modules are a giant step up from the L298N's 2 A,
+   but that rating is a different kind of optimistic than a direct swap
+   implies.
+
+If any of this doesn't check out, the G2 24v13 branch (`DRV_G2`) already in
+`Config.h` runs 6.5–40 V and was the original plan for exactly this margin
+reason — it is the fallback if the HW-039 does not hold up either.
 
 ## The encoder
 

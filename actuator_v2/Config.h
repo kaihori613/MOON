@@ -24,22 +24,29 @@
 // ===========================================================================
 //  1. PINS
 // ===========================================================================
-//  Two drivers are supported. Set MOTOR_DRIVER to whichever is actually
+//  Three drivers are supported. Set MOTOR_DRIVER to whichever is actually
 //  wired, the way v1 did -- switching should be a config change, not a
 //  rewrite.
 //
-//  DRV_L298N is what is on the bench. At 25 V it is inside its voltage
-//  rating, but read section 1b before trusting it: the current and the heat
-//  are the problems, not the volts.
+//  DRV_L298N is RETIRED on this bench: channel B, the spare used after
+//  channel A died the same way in v1, has now also burned out. Do not wire
+//  this back in without a fresh module.
 //
-//  DRV_G2 is the Pololu G2 24v13, the intended eventual part. Two-pin
-//  interface -- one direction bit and one PWM -- plus /SLP, which MUST be
-//  driven HIGH or the bridge stays asleep and a perfectly correct PWM moves
-//  nothing while looking exactly like a dead motor.
+//  DRV_HW039 is what replaced it -- a BTS7960 43A half-bridge module, same
+//  part and same pins v1 already runs it on. RPWM/LPWM are PWM inputs, one
+//  per direction; R_EN and L_EN are tied together on this board into one EN
+//  line, HIGH to enable, LOW the hard off switch.
+//
+//  DRV_G2 is the Pololu G2 24v13, the originally-intended part, still not on
+//  the bench. Two-pin interface -- one direction bit and one PWM -- plus
+//  /SLP, which MUST be driven HIGH or the bridge stays asleep and a
+//  perfectly correct PWM moves nothing while looking exactly like a dead
+//  motor.
 #define DRV_L298N 1
 #define DRV_G2    2
+#define DRV_HW039 3
 
-#define MOTOR_DRIVER  DRV_L298N      // <-- match your hardware
+#define MOTOR_DRIVER  DRV_HW039      // <-- match your hardware
 
 #if MOTOR_DRIVER == DRV_L298N
   // Channel B, the same pins v1 and reed_switch_test use. Channel A on this
@@ -50,6 +57,9 @@
   // The names stay ENA/IN1/IN2 so the driver code reads the same either way;
   // on channel 2 they are wired to ENB/IN3/IN4. ENB is Timer1 (OC1B), the
   // same timer and ~490 Hz that D9 gave channel A.
+  //
+  // Channel B is now ALSO DEAD -- see the note at the top of this section.
+  // This branch stays only in case a replacement module goes back on.
   #define L298N_CHANNEL 2
 
   #if L298N_CHANNEL == 1
@@ -72,18 +82,23 @@
   #else
     #error "Set L298N_CHANNEL to 1 or 2"
   #endif
+#elif MOTOR_DRIVER == DRV_HW039
+  const uint8_t PIN_RPWM = 9;    // extend  -- same physical pin v1 uses
+  const uint8_t PIN_LPWM = 10;   // retract
+  const uint8_t PIN_EN   = 8;    // both R_EN and L_EN, tied together
 #elif MOTOR_DRIVER == DRV_G2
   const uint8_t PIN_PWM = 9;   // Timer1. Never 5/6: analogWrite(0) on Timer0
                                //   may not fully release the output.
   const uint8_t PIN_DIR = 12;  // not D7: D7 is the kill input on both drivers
   const uint8_t PIN_SLP = 8;   // HIGH = awake. LOW is the hard off switch.
 #else
-  #error "Set MOTOR_DRIVER to DRV_L298N or DRV_G2"
+  #error "Set MOTOR_DRIVER to DRV_L298N, DRV_HW039 or DRV_G2"
 #endif
 
-// Current sense. The G2 provides one; the L298N module's sense pins are
-// usually jumpered to ground, so leave USE_CURRENT_LIMIT off with it. A3 is
-// otherwise free on this panel.
+// Current sense. The G2 provides one on PIN_CS; the L298N module's sense
+// pins are usually jumpered to ground; the HW-039 has its own R_IS/L_IS
+// outputs, one per side, which are not wired here. Leave USE_CURRENT_LIMIT
+// off with either. A3 is otherwise free on this panel.
 const uint8_t PIN_CS = A3;
 
 // ===========================================================================
