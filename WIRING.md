@@ -127,7 +127,7 @@ loop instead of corrupting the measurement.
 - Needs a **diametrically** magnetised magnet (6×2.5 mm N35 is typical),
   centred on the shaft axis within ~0.25 mm, at a 0.5–3 mm air gap
 
-Run `as5600_test/` before wiring any of this to the motor. It reports the
+Run `archive/as5600_test/` before wiring any of this to the motor. It reports the
 `STATUS` magnet bits and the AGC value live, which is the only way to tell a
 correctly mounted magnet from one that merely produces plausible numbers on
 the bench and drifts once it is on the mount.
@@ -411,7 +411,7 @@ included. None of them blocks the loop. Set `USE_BUZZER` to 0 if nothing is fitt
 ## Build order
 
 1. **Check the actuator's plate against 25 V.** Nothing else is safe first.
-2. **Run `as5600_test/`** with no motor power at all. Magnet status ok, AGC
+2. **Run `archive/as5600_test/`** with no motor power at all. Magnet status ok, AGC
    mid-scale, sweep the full range by hand, note the counting direction and
    confirm the range does not straddle the wrap.
 3. **Set `ENCODER_INVERT` and `ENCODER_ZERO_DEFAULT`** from what step 2 told

@@ -324,8 +324,9 @@ Needs real measurements, and is worth it if yaw sweeps a wide arc:
 this machine the bottom pin joint is offset 48 mm perpendicular to the rod,
 which makes those two distances differ by 2.249 mm at home and makes them
 extend at slightly different rates — the pins gain 76.707 mm over a 77 mm
-stroke. Measure the joints, not the tube. See
-[docs/linkage-geometry-2026-09-08.md](../docs/linkage-geometry-2026-09-08.md).
+stroke. Measure the joints, not the tube. The full CAD derivation behind
+those numbers was a dated bench-session doc, since removed as stale; see
+git history if it's needed again.
 
 The last one is the same trap as `counts_a` above. This model is anchored to
 the **retract stop**, not to count zero, and those are the same place only
@@ -334,12 +335,13 @@ the model is asking about a point half a stroke away — 174 mm out, on a
 different part of the arc. It mirrors `degreesNow()` in the sketch, which
 measures from `retractStopPos()` for the same reason.
 
-Note `mm_per_count` comes from `reed_switch_test`, and as of the bench session
-of 4 Sep 2026 **it does not yet exist as a trustworthy number**: reed counts
-did not map consistently to distance, disagreeing by 7.5× across two steps of
-the same run at the same physical speed. Until that is resolved the triangle
-model cannot be calibrated, because its one sensor-derived input is the one
-that is wrong. See [docs/calibration-2026-09-04.md](../docs/calibration-2026-09-04.md).
+Note `mm_per_count` comes from `reed_switch_test` (now `archive/reed_switch_test/`,
+superseded by the AS5600 approach in `actuator_v2`), and as of the 4 Sep 2026
+bench session **it did not exist as a trustworthy number**: reed counts did
+not map consistently to distance, disagreeing by 7.5× across two steps of the
+same run at the same physical speed. The `triangle` model is unusable until
+that is fixed on a sketch that still uses reed counts for position; `actuator_v2`
+does not, so this whole model is only relevant if `actuator_v1` is ever revived.
 
 ### Compass headings
 
