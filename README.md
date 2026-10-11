@@ -32,6 +32,16 @@ from your coordinates, drive the actuator there over USB, and (in
 progress, on its own branch) close the loop using live SNR from an SDR
 instead of a human watching a signal meter. See [host/README.md](host/README.md).
 
+## `tools/`
+
+`syntax_check.sh` compiles every sketch (including `archive/`) with a host
+`g++` against stub Arduino headers — no `arduino-cli` needed. Catches typos,
+missing declarations and `#ifdef` branches that have never been built;
+it does not catch anything that needs real hardware. `--matrix` also builds
+every `MOTOR_DRIVER`/feature-flag permutation for `actuator_v1` and
+`actuator_v2`, which is exactly the kind of thing a driver swap like the
+HW-039 one should have been checked against before it went on the bench.
+
 ## `archive/`
 
 Sketches whose bring-up job is done and whose working knowledge now lives
