@@ -441,19 +441,25 @@ queueing up a pile of moves and overshooting.
 
 ## Testing it with no actuator
 
-There is no simulator any more — it belonged to `actuator_system/`, which was
-deleted in favour of `actuator_v1/`. So the serial side currently cannot be
-exercised without a real Arduino and a real actuator. (The old simulator is
-recoverable from git history if that becomes painful.)
+`moon_yaw.py`'s serial side has no simulator any more — it belonged to
+`actuator_system/`, which was deleted in favour of `actuator_v1/`, and is
+recoverable from git history if that becomes painful. `snr_peak.py
+--simulate` covers the `actuator_v2` loop instead, with a fake dish standing in
+for both the actuator and the SDR.
 
-The pointing math has its own test, which needs no hardware at all — and no
-`pyserial` either, so it runs on any interpreter you can find. 27/27 as of
-8 Sep 2026. There is no `python` on `PATH` on the build machine; ANSYS ships
-one that works:
+Everything else runs under pytest with no hardware, from `host/` with the
+project's `.venv` (`pip install -r requirements.txt numpy pytest`):
 
 ```bash
-"/c/Program Files/ANSYS Inc/ANSYS Student/v261/optiSLang/lib/python3.10/python.exe" test_geometry.py
+pytest
 ```
+
+128 passed and 1 expected failure as of 27 Oct 2026. The expected failure is a
+known bug, kept visible on purpose: `snr_psd` returns a number on pure noise
+about half the time instead of refusing the way `snr_m2m4` does. The marker is
+strict, so fixing the bug turns it into a failure until the marker is removed.
+`test_geometry.py` alone still needs nothing beyond the standard library:
+`python test_geometry.py`.
 
 ## Files
 
@@ -467,6 +473,9 @@ one that works:
 | `config.py` | site, linkage and trim persistence |
 | `keys.py` | cross-platform single-keypress reader |
 | `test_geometry.py` | self-checks for the math |
+| `test_snr_peak.py` | the outer loop's safety rules, against a fake link and dish |
+| `test_check_pointing.py` | when an SNR drop is real enough to call for a re-peak |
+| `test_iq_metric.py` | both SNR estimators and `SdrSnrMetric` on synthetic IQ |
 
 `link.py` deliberately sends only commands you could have typed by hand into
 the Serial Monitor. When something misbehaves, unplug the script, open the
