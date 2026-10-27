@@ -9,3 +9,5 @@ pyserial>=3.5
 # else to download. The dongle still needs its driver swapped to WinUSB with
 # Zadig (https://zadig.akeo.ie) once, or librtlsdr finds no devices.
 # pyrtlsdr>=0.3
+# Optional. Only snr_peak.py --plot needs it (it pulls in numpy as well).
+# matplotlib>=3.7

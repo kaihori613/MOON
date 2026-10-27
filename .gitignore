@@ -19,6 +19,8 @@ venv/
 host/config.json
 # Written by snr_peak.py --sweep: this dish's peak angle and reference SNR.
 host/pointing.json
+# Written by snr_peak.py --plot.
+host/sweep.png
 
 # Editor / IDE
 .vscode/

@@ -13,6 +13,7 @@ on SNR, where it does not: SNR against angle is a hill, and the same reading
 occurs on both sides of it. See peak.py.
 
     python snr_peak.py --simulate --sweep -8 8 1      whole loop, no hardware
+    python snr_peak.py --simulate --sweep -8 8 1 --plot   ...and draw it to sweep.png
     python snr_peak.py --port COM3 --sweep -8 8 1     find the peak, park, save
     python snr_peak.py --port COM3 --check            is the signal still what it was?
 
@@ -56,6 +57,7 @@ LAND_TOL_DEG = 0.6
 BEAMWIDTH_DEG = 12.0        # 1 m dish at 1694 MHz, as in actuator_v2/Config.h
 MOVE_TIMEOUT_S = 45.0       # the sketch's own MAX_RUN_MS is 30 s
 DEFAULT_REF = Path(__file__).with_name("pointing.json")
+DEFAULT_PLOT = Path(__file__).with_name("sweep.png")
 
 
 class PeakRunError(RuntimeError):
@@ -303,6 +305,19 @@ def load_reference(path: Path):
     return PointingReference.from_dict(data["reference"]), data["sdr"]
 
 
+def save_plot(path, result, lo, hi, **kw):
+    """
+    Draw the sweep. A missing matplotlib is reported, not raised: by the time
+    this runs the dish has already moved and parked, and a picture is not
+    worth turning a good sweep into a failed one.
+    """
+    from sweep_plot import plot_sweep
+    try:
+        print(f"  plot saved to {plot_sweep(path, result, lo, hi, **kw)}")
+    except (RuntimeError, OSError) as exc:
+        print(f"  no plot: {exc}", file=sys.stderr)
+
+
 # ===========================================================================
 
 def main(argv=None):
@@ -320,6 +335,10 @@ def main(argv=None):
                     help=f"reference file (default {DEFAULT_REF.name})")
     ap.add_argument("--no-save", action="store_true",
                     help="sweep without overwriting the reference file")
+    ap.add_argument("--plot", nargs="?", type=Path, const=DEFAULT_PLOT,
+                    metavar="PNG",
+                    help=f"draw the sweep to a PNG (default {DEFAULT_PLOT.name}); "
+                         "needs matplotlib")
     ap.add_argument("--settle", type=float, default=1.0,
                     help="seconds to wait after each move before measuring")
     ap.add_argument("--dwell", type=float, default=3.0,
@@ -348,6 +367,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     errors = (PeakRunError, IqMetricError)
+    if args.plot and args.check:
+        ap.error("--plot draws a sweep; use it with --sweep")
 
     # --- simulation --------------------------------------------------------
     if args.simulate:
@@ -356,19 +377,24 @@ def main(argv=None):
         dish = SimDish(args.sim_peak, seed=args.sim_seed)
         lo, hi, step = args.sweep
         try:
-            ref, _ = run_sweep(dish, dish, lo, hi, step, settle=0.0,
-                               dwell=args.dwell, ref_dwell=args.ref_dwell,
-                               metric_name="simulated")
-            if ref is None:
-                return 1
-            print(f"  true peak {args.sim_peak:+.3f} deg, found "
-                  f"{ref.angle:+.3f} -- off by {ref.angle - args.sim_peak:+.3f}")
-            print()
-            run_check(dish, dish, ref, settle=0.0, dwell=args.dwell)
+            ref, result = run_sweep(dish, dish, lo, hi, step, settle=0.0,
+                                    dwell=args.dwell, ref_dwell=args.ref_dwell,
+                                    metric_name="simulated")
+            verdict = None
+            if ref is not None:
+                print(f"  true peak {args.sim_peak:+.3f} deg, found "
+                      f"{ref.angle:+.3f} -- off by {ref.angle - args.sim_peak:+.3f}")
+                print()
+                verdict = run_check(dish, dish, ref, settle=0.0, dwell=args.dwell)
         except errors as exc:
             print(f"\nerror: {exc}", file=sys.stderr)
             return 1
-        return 0
+        if args.plot:
+            save_plot(args.plot, result, lo, hi, ref=ref, verdict=verdict,
+                      title=f"simulated sweep {lo:+g}..{hi:+g} deg, step {step:g}",
+                      true_beam=(dish.peak_deg, dish.peak_snr_db,
+                                 dish.beamwidth_deg))
+        return 0 if ref is not None else 1
 
     # --- hardware ----------------------------------------------------------
     if not args.port:
@@ -416,6 +442,10 @@ def main(argv=None):
         lo, hi, step = args.sweep
         ref, result = run_sweep(mover, metric, lo, hi, step, args.settle,
                                 args.dwell, args.ref_dwell, describe_metric(metric))
+        if args.plot:
+            save_plot(args.plot, result, lo, hi, ref=ref,
+                      title=f"{describe_metric(metric)}, {lo:+g}..{hi:+g} deg, "
+                            f"step {step:g}")
         if ref is None:
             return 1
         if args.no_save:

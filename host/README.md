@@ -283,6 +283,7 @@ this: it speaks `actuator_v1`, whose `g` takes reed counts.
 
 ```bash
 python snr_peak.py --simulate --sweep -8 8 1     # whole loop, fake dish, no hardware
+python snr_peak.py --simulate --sweep -8 8 1 --plot   # ...and draw it to sweep.png
 python iq_metric.py --watch                       # the SDR on its own, first
 python snr_peak.py --port COM3 --sweep -8 8 1    # peak, park, save pointing.json
 python snr_peak.py --port COM3 --check           # is SNR still what the sweep found?
@@ -454,7 +455,7 @@ project's `.venv` (`pip install -r requirements.txt numpy pytest`):
 pytest
 ```
 
-128 passed and 1 expected failure as of 27 Oct 2026. The expected failure is a
+133 passed and 1 expected failure as of 27 Oct 2026. The expected failure is a
 known bug, kept visible on purpose: `snr_psd` returns a number on pure noise
 about half the time instead of refusing the way `snr_m2m4` does. The marker is
 strict, so fixing the bug turns it into a failure until the marker is removed.
@@ -468,6 +469,7 @@ strict, so fixing the bug turns it into a failure until the marker is removed.
 | `moon_yaw.py` | entry point for `actuator_v1`: automatic cycle, then manual tuning |
 | `snr_peak.py` | entry point for `actuator_v2`: peak on SDR SNR, then check against it |
 | `iq_metric.py` | live SNR from the RTL-SDR, in the shape `peak.sweep()` reads |
+| `sweep_plot.py` | `snr_peak.py --plot`: the sweep as a chart (needs matplotlib) |
 | `geometry.py` | look angles to a geostationary satellite; linkage models |
 | `link.py` | serial transport, speaks the sketch's existing console protocol |
 | `config.py` | site, linkage and trim persistence |

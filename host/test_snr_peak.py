@@ -327,3 +327,50 @@ def test_main_refuses_when_sdr_preflight_fails(fake_port, monkeypatch, capsys):
 def test_simulate_runs_end_to_end():
     args = ["--simulate", "--sweep", "-8", "8", "1", "--sim-seed", "3"]
     assert snr_peak.main(args) == 0
+
+
+# --- --plot ----------------------------------------------------------------
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.mark.parametrize("sweep, code", [
+    (["-8", "8", "1"], 0),          # peak found
+    (["-8", "1", "1"], 1),          # peak past the range: still drawn
+])
+def test_simulate_plot_writes_a_png(tmp_path, sweep, code):
+    pytest.importorskip("matplotlib")
+    png = tmp_path / "sweep.png"
+    args = ["--simulate", "--sweep", *sweep, "--sim-seed", "3", "--plot", str(png)]
+    assert snr_peak.main(args) == code
+    assert png.read_bytes()[:8] == PNG_MAGIC
+
+
+def test_plot_draws_missing_readings(tmp_path):
+    """Angles with no reading are part of the picture, not dropped from it."""
+    pytest.importorskip("matplotlib")
+    from sweep_plot import plot_sweep
+    result = PeakResult(None, None, [(-2.0, None, None, 0), (-1.0, 5.0, 1.0, 30),
+                                     (0.0, 6.0, 1.0, 30), (1.0, None, None, 0)],
+                        False, "no usable reading anywhere in the range")
+    png = plot_sweep(tmp_path / "s.png", result, -2, 1)
+    assert png.read_bytes()[:8] == PNG_MAGIC
+
+
+def test_plot_with_check_is_refused():
+    with pytest.raises(SystemExit):
+        snr_peak.main(["--port", "COM9", "--check", "--plot"])
+
+
+def test_missing_matplotlib_does_not_fail_the_sweep(monkeypatch, tmp_path, capsys):
+    """The dish has already parked by then; a picture is not worth a failure."""
+    import sweep_plot
+
+    def no_matplotlib(*a, **kw):
+        raise RuntimeError("--plot needs matplotlib: pip install matplotlib")
+
+    monkeypatch.setattr(sweep_plot, "plot_sweep", no_matplotlib)
+    args = ["--simulate", "--sweep", "-8", "8", "1", "--sim-seed", "3",
+            "--plot", str(tmp_path / "s.png")]
+    assert snr_peak.main(args) == 0
+    assert "no plot" in capsys.readouterr().err
