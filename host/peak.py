@@ -55,6 +55,7 @@ class PeakResult:
         self.samples = samples          # [(angle, score, stdev, n), ...]
         self.interpolated = interpolated
         self.reason = reason
+        self.coarse = None              # the first pass, when this one refined it
 
     @property
     def ok(self):
@@ -157,14 +158,70 @@ def parabolic_fit(points):
     return vertex
 
 
+def fit_peak(samples, fit_points=None):
+    """
+    Where the peak is, from (angle, score, stdev, n) samples -- score None
+    meaning no reading there. Higher score is better. Returns a PeakResult
+    whose samples are the ones passed in, sorted by angle; nothing moves.
+
+    Split out of sweep() so a second, finer pass can be fitted together with
+    the first: the samples do not need to be equally spaced or come from one
+    sweep. See sweep() for why every reading is fitted, not just the best few.
+    """
+    samples = sorted(samples, key=lambda s: s[0])
+    measured = [(a, s) for (a, s, _sd, _n) in samples if s is not None]
+    if not measured:
+        return PeakResult(None, None, samples, False,
+                          "no usable reading anywhere in the range")
+
+    best_i = max(range(len(measured)), key=lambda i: measured[i][1])
+    best_angle, best_score = measured[best_i]
+
+    # A peak at the very edge means the real one is probably outside the range
+    # that was swept, so the answer is "widen the sweep", not this number.
+    if best_i == 0 or best_i == len(measured) - 1:
+        return PeakResult(None, None, samples, False,
+                          f"best reading is at the edge of the sweep "
+                          f"({best_angle:+.2f} deg) -- widen the range")
+
+    # Fit every reading rather than just the three around the maximum -- see
+    # parabolic_fit for why three is not enough on a wide beam.
+    interpolated = False
+    if fit_points is None:
+        chosen = list(measured)
+    else:
+        ranked = sorted(measured, key=lambda p: p[1], reverse=True)
+        chosen = sorted(ranked[:max(3, fit_points)], key=lambda p: p[0])
+    refined = parabolic_fit(chosen)
+    if refined is None:
+        # Fall back to the classic three-point vertex, then to the raw best.
+        refined = parabolic_peak(measured[best_i - 1][0], measured[best_i - 1][1],
+                                 measured[best_i][0],     measured[best_i][1],
+                                 measured[best_i + 1][0], measured[best_i + 1][1])
+    if refined is not None:
+        best_angle = refined
+        interpolated = True
+    return PeakResult(best_angle, best_score, samples, interpolated)
+
+
 def sweep(move_to, read_metric, lo, hi, step,
           settle=1.0, dwell=3.0, lower_is_better=False,
-          on_point=None, return_on_failure=True, fit_points=None):
+          on_point=None, return_on_failure=True, fit_points=None, park=True):
     """
     Stop-measure-move across [lo, hi], then park on the best angle found.
 
-    move_to(angle)      -> drive there and block until it has settled
+    move_to(angle)      -> drive there and block until it has settled; may
+                           return where it actually landed
     read_metric()       -> (mean, stdev, n), or raise to mean "no reading"
+
+    A reading is credited to where the move LANDED when move_to says, and to
+    the commanded angle otherwise. A PID stops anywhere inside its deadband,
+    so the commanded angle is up to a deadband off -- small against a 1 deg
+    step, not against the half-degree steps of a refining pass. In
+    simulation, crediting the landed angle cut the peak error by about 15%.
+
+    park=False skips the final move to the peak, for a caller that is about
+    to sweep again anyway.
 
     lower_is_better flips the comparison for metrics like Viterbi corrected
     errors, which fall as the signal improves. Internally everything becomes a
@@ -194,9 +251,14 @@ def sweep(move_to, read_metric, lo, hi, step,
     start_angle = None
     samples = []
 
-    angle = lo
-    while angle <= hi + 1e-9:
-        move_to(angle)
+    # Each angle is computed from lo, not accumulated: adding 0.5 twenty-five
+    # times lands on 13.000000000000002, past a 13 deg soft limit. Clamped to
+    # hi for the same reason.
+    n_points = int(math.floor((hi - lo) / step + 1e-9)) + 1
+    for i in range(n_points):
+        angle = min(lo + i * step, hi)
+        landed = move_to(angle)
+        at = landed if isinstance(landed, (int, float)) else angle
         if start_angle is None:
             start_angle = angle
         if settle > 0:
@@ -204,59 +266,26 @@ def sweep(move_to, read_metric, lo, hi, step,
         try:
             mean, stdev, n = read_metric()
             score = -mean if lower_is_better else mean
-            samples.append((angle, score, stdev, n))
+            samples.append((at, score, stdev, n))
         except Exception as exc:
             # No reading here is information, not an error: it means no lock at
             # this angle, which is exactly what the edges of a sweep look like.
-            samples.append((angle, None, None, 0))
+            samples.append((at, None, None, 0))
             if on_point:
-                on_point(angle, None, str(exc))
-            angle += step
+                on_point(at, None, str(exc))
             continue
 
         if on_point:
-            on_point(angle, score, None)
-        angle += step
+            on_point(at, score, None)
 
-    measured = [(a, s) for (a, s, _sd, _n) in samples if s is not None]
-    if not measured:
+    result = fit_peak(samples, fit_points)
+    if not result.ok:
         if return_on_failure and start_angle is not None:
             move_to(start_angle)
-        return PeakResult(None, None, samples, False,
-                          "no usable reading anywhere in the range")
-
-    best_i = max(range(len(measured)), key=lambda i: measured[i][1])
-    best_angle, best_score = measured[best_i]
-
-    # A peak at the very edge means the real one is probably outside the range
-    # that was swept, so the answer is "widen the sweep", not this number.
-    if best_i == 0 or best_i == len(measured) - 1:
-        if return_on_failure and start_angle is not None:
-            move_to(start_angle)
-        return PeakResult(None, None, samples, False,
-                          f"best reading is at the edge of the sweep "
-                          f"({best_angle:+.2f} deg) -- widen the range")
-
-    # Fit every reading rather than just the three around the maximum -- see
-    # parabolic_fit for why three is not enough on a wide beam.
-    interpolated = False
-    if fit_points is None:
-        chosen = list(measured)
-    else:
-        ranked = sorted(measured, key=lambda p: p[1], reverse=True)
-        chosen = sorted(ranked[:max(3, fit_points)], key=lambda p: p[0])
-    refined = parabolic_fit(chosen)
-    if refined is None:
-        # Fall back to the classic three-point vertex, then to the raw best.
-        refined = parabolic_peak(measured[best_i - 1][0], measured[best_i - 1][1],
-                                 measured[best_i][0],     measured[best_i][1],
-                                 measured[best_i + 1][0], measured[best_i + 1][1])
-    if refined is not None:
-        best_angle = refined
-        interpolated = True
-
-    move_to(best_angle)
-    return PeakResult(best_angle, best_score, samples, interpolated)
+        return result
+    if park:
+        move_to(result.best_angle)
+    return result
 
 
 # ---------------------------------------------------------------------------

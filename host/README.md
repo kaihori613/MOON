@@ -283,6 +283,7 @@ this: it speaks `actuator_v1`, whose `g` takes reed counts.
 
 ```bash
 python snr_peak.py --simulate --sweep -8 8 1     # whole loop, fake dish, no hardware
+python snr_peak.py --simulate --sweep -8 8 1 --plot   # ...and draw it to sweep.png
 python iq_metric.py --watch                       # the SDR on its own, first
 python snr_peak.py --port COM3 --sweep -8 8 1    # peak, park, save pointing.json
 python snr_peak.py --port COM3 --check           # is SNR still what the sweep found?
@@ -291,12 +292,73 @@ python snr_peak.py --port COM3 --check           # is SNR still what the sweep f
 Only run it on hardware once both halves work alone: the PID holding a `g`
 target typed into the serial console, and `--watch` giving believable numbers.
 
+### What the simulation randomizes, and Monte Carlo
+
+The fake dish has its own random number generator, seeded with `--sim-seed`;
+without a seed, each run differs. Two things in it are random:
+
+- **Every SNR reading** is the beam's true value plus Gaussian noise of 1 dB.
+  At 10 readings a second, a 3 s dwell averages 30 of them.
+- **Every move** lands at the target plus a uniform offset of up to ±0.25°,
+  standing in for the PID's deadband.
+
+The noise model is an assumption until `iq_metric.py --noise` measures the
+real one. It has no slow drift (gain, weather), which the real SDR will have.
+
+One `--simulate` run is one random example. Two options turn it into a study:
+
+```bash
+python snr_peak.py --simulate --sweep -8 8 1 --sim-beam airy --sim-peak 5.5 --trials 200
+python snr_peak.py --simulate --sweep -8 8 1 --sim-beam airy --sim-peak 5.5 --trials 200 --no-refine --plot mc.png
+```
+
+- **`--sim-beam airy`** replaces the parabolic beam with a real circular
+  dish's pattern. The parabola is exactly what the fit assumes, so it can only
+  ever show noise. The Airy beam matches it to within 0.03 dB out to half the
+  beamwidth, then falls faster: 7.4 dB down at 9° against the parabola's 6.75.
+  That difference is what makes a one-flank fit lean.
+- **`--trials N`** runs N sweeps quietly and prints the median, 90th
+  percentile, worst and **signed mean** of how far the peak landed from the
+  truth. Noise scatters the answer evenly around zero. A model error shifts
+  the whole scatter to one side, and only the signed mean shows that. With
+  `--plot`, it draws a histogram instead of a sweep.
+
+The two commands above, seeds 1000..1199:
+
+| | median | worst | signed mean |
+|---|---|---|---|
+| one pass | 0.303° | 0.672° | **−0.290°** |
+| two passes | 0.037° | 0.190° | +0.009° |
+
 - **Before anything moves**, it refuses a sketch that isn't `actuator_v2`, a
   controller that is already faulted, a range past the ±13° soft limit, and an
   SDR that won't deliver samples.
 - **During the sweep**, a move that lands more than 0.6° from its target aborts
   it. That means the move was refused, or a panel button took over, and a
-  reading there would be credited to the wrong angle.
+  reading there would be credited to the wrong angle. Inside that tolerance,
+  each reading is credited to where the move actually landed, not where it
+  was sent.
+- **It sweeps twice**, unless you pass `--no-refine`. The second pass is centred
+  on the first pass's peak, half a beamwidth (6°) either side, at half the
+  step. The peak is then fitted to both passes together. This roughly 2.5×
+  the sweep time.
+  - **Why it's wide, not narrow:** a narrow fine pass (±2° at 0.25°) measured
+    about three times *worse* than no second pass at all. Every new reading
+    sits on the flat top, where the beam changes less than the noise does.
+  - **What it fixes:** a peak near the end of the `--sweep` range leaves the
+    first pass with only one flank. On a real beam, which is not quite a
+    parabola, the fit then leans toward that flank. In simulation on an Airy
+    beam with the peak at +4° to +6.5° on a −8..8 sweep, the fitted peak was
+    0.29° off (median), and averaging longer did not help. With the second
+    pass it was 0.04°.
+  - **It may go past LO..HI**, never past the ±13° soft limit. Kept inside the
+    typed range, an edge peak gets one flank again, and the error went back to
+    0.22°.
+  - **What it doesn't fix:** where the dish finally parks is limited by the
+    PID's ±0.25° deadband, about 0.12° median, which is now bigger than the
+    fit's own error. On a 12° beam that costs under 0.01 dB. Even the
+    one-pass worst case, 0.95°, costs 0.07 dB. The second pass matters more
+    for a narrower beam: a bigger dish or a higher frequency.
 - **Any failure** returns the dish to where it was before the sweep, not to the
   first swept angle.
 - **`pointing.json`** holds the peak angle, the reference SNR and the exact SDR
@@ -308,11 +370,28 @@ target typed into the serial console, and `--watch` giving believable numbers.
 
 ## Setup
 
+From the repo root, in a virtual environment (on Windows the interpreter is
+`.venv\Scripts\python.exe`; [docs/dev-setup.md](../docs/dev-setup.md) has the
+full Windows setup, including the RTL-SDR driver):
+
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+.venv/Scripts/python -m pip install -r host/requirements.txt numpy matplotlib pytest "pyrtlsdr[lib]"
 ```
 
-Python 3.8+. The only dependency is pyserial.
+Python 3.8 or newer; 3.12 is what everything here is run on. Only `pyserial` is
+required. The rest are optional, and each only matters for part of `host/`:
+
+| package | needed for |
+|---|---|
+| `pyserial` | anything that talks to the Arduino |
+| `numpy` | the `snr_psd` estimator (`--signal-bw`); `snr_m2m4` needs nothing |
+| `pyrtlsdr[lib]` | reading the RTL-SDR. `[lib]` bundles librtlsdr, so Windows needs no separate download, but the dongle still needs its driver swapped to WinUSB with Zadig once |
+| `matplotlib` | `snr_peak.py --plot` |
+| `pytest` | running the tests |
+
+`snr_peak.py --simulate`, with or without `--trials` and `--sim-beam`, runs on
+the standard library alone.
 
 First run writes a blank `config.json` and stops:
 
@@ -441,19 +520,30 @@ queueing up a pile of moves and overshooting.
 
 ## Testing it with no actuator
 
-There is no simulator any more — it belonged to `actuator_system/`, which was
-deleted in favour of `actuator_v1/`. So the serial side currently cannot be
-exercised without a real Arduino and a real actuator. (The old simulator is
-recoverable from git history if that becomes painful.)
+`moon_yaw.py`'s serial side has no simulator any more — it belonged to
+`actuator_system/`, which was deleted in favour of `actuator_v1/`, and is
+recoverable from git history if that becomes painful. `snr_peak.py
+--simulate` covers the `actuator_v2` loop instead, with a fake dish standing in
+for both the actuator and the SDR.
 
-The pointing math has its own test, which needs no hardware at all — and no
-`pyserial` either, so it runs on any interpreter you can find. 27/27 as of
-8 Sep 2026. There is no `python` on `PATH` on the build machine; ANSYS ships
-one that works:
+Everything else runs under pytest with no hardware, from `host/` with the
+project's `.venv` (`pip install -r requirements.txt numpy pytest`):
 
 ```bash
-"/c/Program Files/ANSYS Inc/ANSYS Student/v261/optiSLang/lib/python3.10/python.exe" test_geometry.py
+pytest
 ```
+
+165 passed as of 27 Oct 2026. `test_geometry.py` alone still needs nothing
+beyond the standard library: `python test_geometry.py`.
+
+Both SNR estimators refuse pure noise rather than return a number from it.
+`snr_psd` did not until 27 Oct 2026: it reported about half of all noise-only
+captures as SNRs near -25 dB, which a sweep would happily climb. It now splits
+the capture into 16 groups in time and needs the in-band excess three standard
+errors above zero. Over 1000 noise-only captures that let 2 through, where the
+old code let 504 through. Real signals read the same down to -15 dB. Fainter
+than about -17 dB in a 2^18-sample capture, the estimator now refuses them as
+well, because by then the signal is the size of the noise's own scatter.
 
 ## Files
 
@@ -462,11 +552,16 @@ one that works:
 | `moon_yaw.py` | entry point for `actuator_v1`: automatic cycle, then manual tuning |
 | `snr_peak.py` | entry point for `actuator_v2`: peak on SDR SNR, then check against it |
 | `iq_metric.py` | live SNR from the RTL-SDR, in the shape `peak.sweep()` reads |
+| `sweep_plot.py` | `snr_peak.py --plot`: the sweep as a chart (needs matplotlib) |
 | `geometry.py` | look angles to a geostationary satellite; linkage models |
 | `link.py` | serial transport, speaks the sketch's existing console protocol |
 | `config.py` | site, linkage and trim persistence |
 | `keys.py` | cross-platform single-keypress reader |
 | `test_geometry.py` | self-checks for the math |
+| `test_snr_peak.py` | the outer loop's safety rules, against a fake link and dish |
+| `test_check_pointing.py` | when an SNR drop is real enough to call for a re-peak |
+| `test_iq_metric.py` | both SNR estimators and `SdrSnrMetric` on synthetic IQ |
+| `conftest.py` | a fake pyrtlsdr, so the tests can check the dongle is opened once and always closed |
 
 `link.py` deliberately sends only commands you could have typed by hand into
 the Serial Monitor. When something misbehaves, unplug the script, open the

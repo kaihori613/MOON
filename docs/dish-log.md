@@ -2,6 +2,15 @@
 
 **Project MOON** — status summary
 
+> **Read this as history from "Position is counted, not timed" onward.** It
+> was written for `actuator_v1`, which positioned the dish by counting reed
+> pulses. `actuator_v2` replaced that with an AS5600 absolute encoder on the
+> pivot, and the L298N it mentions has since burned out and been replaced by
+> an HW-039. The sections marked *superseded* below are kept because the
+> reasoning is still worth reading, not because they describe the project
+> now. For where things stand, see [Since actuator_v1](#since-actuator_v1) at
+> the end, and the [README](../README.md).
+
 Our next objective is to acquire imagery from GEO weather satellites with a
 parabolic satellite dish.
 
@@ -35,9 +44,15 @@ actuator presents only four wires — two heavy ones for the motor, two light on
 for the reed, which is an isolated dry contact.
 
 We decided to use an L298N motor driver to create extension and retraction
-control, and it works.
+control, and it works. *(Later: both its channels burned out, on two boards,
+the same way. The driver is now an HW-039 — see
+[WIRING.md](../WIRING.md#the-l298n-is-retired--both-channels-are-now-dead).)*
 
 ## Position is counted, not timed
+
+> *Superseded by `actuator_v2`*, which reads the angle directly from an
+> absolute encoder and keeps the reed only as a motion witness. The argument
+> against timing moves still holds.
 
 The single most important design decision so far is that the actuator is
 positioned by **reed count, never by elapsed time**.
@@ -110,6 +125,12 @@ holding a button against a cam limit would re-energise the motor indefinitely.
 
 ## What everything waits on
 
+> *Superseded by `actuator_v2`.* With an absolute encoder, the reed count is
+> no longer the resolution of the system, so nothing waits on this any more.
+> The equivalent floor now is the encoder's noise and the PID's deadband
+> (±0.25° in `actuator_v2/Config.h`, still a placeholder until backlash is
+> measured).
+
 **Millimetres per reed count has never been measured on this hardware.**
 
 One count is the smallest move the controller can distinguish, so it is also the
@@ -124,6 +145,10 @@ moment arm from the actuator to the yaw pivot — not a change to any code.
 It is one count-targeted run and a pair of calipers away.
 
 ## Next
+
+> *Written for `actuator_v1`.* Items 3–7 are about reed counting and no
+> longer apply. Items 1, 2 and 8 are mechanical and electrical, and still
+> apply unless they've been done; this log doesn't record whether they have.
 
 1. Repack the gearbox and screw with grease, and resolve the retract fault.
 2. Replace the jumper leads with properly sized wire and raise the supply
@@ -143,3 +168,18 @@ It is one count-targeted run and a pair of calipers away.
 8. Install the permanent cable run to the roof: a 10 m route, 12 AWG SOOW for
    the motor pair and a separate shielded twisted pair for the reed, never
    sharing a jacket.
+
+## Since actuator_v1
+
+- **Position comes from an encoder now.** `actuator_v2` runs PID on the yaw
+  angle read by an AS5600 absolute encoder on the pivot, with the ±15° limit
+  switches read by the firmware, a kill switch, and the reed kept only as a
+  motion witness. Pin map and bring-up cautions: [WIRING.md](../WIRING.md).
+- **The motor driver is an HW-039 (BTS7960).** The L298N burned out.
+- **The angle loop works on hardware.** Luis has `actuator_v2` holding angle
+  on his bench with local changes that are still to be merged.
+- **The SNR peaking loop exists, in simulation.** `host/snr_peak.py` sweeps
+  the dish through angles, reads SNR from an RTL-SDR at each one, fits the
+  peak and parks there. It has not yet run on the dish;
+  [snr-bringup.md](snr-bringup.md) is the plan for that, and where the
+  results go.

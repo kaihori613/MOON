@@ -38,7 +38,8 @@ time, not in parallel:
     while SatDump runs      ->  satdump.py, to refine on the decoder metric
 
 which happens to fit a scheduled recording exactly: peak while the SDR is
-free, then hand it over.
+free, then hand it over -- which means closing it first. RtlSdrCapture holds
+the device open across many reads, so whatever holds one must close it.
 
 TWO ESTIMATORS
 
@@ -58,7 +59,8 @@ from __future__ import annotations
 
 import math
 
-__all__ = ["snr_m2m4", "snr_psd", "SnrError", "to_db"]
+__all__ = ["snr_m2m4", "snr_psd", "SnrError", "to_db", "RtlSdrCapture",
+           "capture_rtlsdr", "parse_gain"]
 
 
 class SnrError(RuntimeError):
@@ -168,8 +170,19 @@ def snr_m2m4(iq) -> float:
 #  Spectral estimator -- needs numpy
 # ---------------------------------------------------------------------------
 
+# snr_psd's noise gate: how many groups the capture is split into in time,
+# and how many standard errors the in-band excess must clear.
+_GATE_GROUPS = 16
+_GATE_SIGMAS = 3.0
+
+
 def _welch(iq, fs, nfft, overlap=0.5):
-    """Averaged periodogram, returned as (freqs, psd) with DC in the middle."""
+    """
+    Welch periodograms, returned as (freqs, segments) with DC in the middle:
+    one row per windowed segment, in time order. The averaged PSD is
+    segments.mean(axis=0); the rows are kept so snr_psd can see how much
+    that average would wander.
+    """
     import numpy as np
 
     x = np.asarray(iq, dtype=np.complex128)
@@ -182,18 +195,14 @@ def _welch(iq, fs, nfft, overlap=0.5):
     # something that changes when the window or the length changes.
     scale = 1.0 / (fs * (win * win).sum())
 
-    acc = np.zeros(nfft)
-    count = 0
-    for start in range(0, x.size - nfft + 1, step):
-        seg = x[start:start + nfft] * win
-        acc += np.abs(np.fft.fft(seg)) ** 2
-        count += 1
-    if count == 0:
+    starts = range(0, x.size - nfft + 1, step)
+    if len(starts) == 0:
         raise SnrError("no complete segments")
+    segs = np.array([np.abs(np.fft.fft(x[s:s + nfft] * win)) ** 2 for s in starts])
 
-    psd = np.fft.fftshift(acc / count) * scale
+    segs = np.fft.fftshift(segs, axes=1) * scale
     freqs = np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / fs))
-    return freqs, psd
+    return freqs, segs
 
 
 def snr_psd(iq, fs, signal_bw, center=0.0, guard=None, nfft=4096,
@@ -221,13 +230,18 @@ def snr_psd(iq, fs, signal_bw, center=0.0, guard=None, nfft=4096,
     With return_detail, also returns the densities and the bin counts, which
     is what you want when the number looks wrong -- almost always because the
     noise window landed on another signal.
+
+    Raises SnrError when the in-band excess is not significantly above what
+    noise alone produces -- the same rule snr_m2m4 applies, for the same
+    reason. See the gate below.
     """
     import numpy as np
 
     if guard is None:
         guard = signal_bw * 0.5
 
-    freqs, psd = _welch(iq, fs, nfft)
+    freqs, segs = _welch(iq, fs, nfft)
+    psd = segs.mean(axis=0)
     off = freqs - center
 
     in_band = np.abs(off) <= (signal_bw * 0.5)
@@ -256,6 +270,36 @@ def snr_psd(iq, fs, signal_bw, center=0.0, guard=None, nfft=4096,
             "no signal here above the noise. For a search this is the correct "
             "answer, not a failure -- the dish is not pointed at it.")
 
+    # On PURE noise the in-band density is above the out-of-band one half the
+    # time, by chance, and the line above lets every one of those through as
+    # a number around -25 dB. That is snr_m2m4's dangerous failure exactly: a
+    # search decides -24 dB beats -25 dB and walks the dish uphill on noise.
+    #
+    # So ask whether the excess is bigger than its own scatter. Split the
+    # segments into consecutive groups in time, measure the excess in each,
+    # and require the mean to sit three standard errors above zero. Groups
+    # far apart in time have independent noise, which is what makes their
+    # scatter honest; measuring it across neighbouring frequency bins instead
+    # would not be, because a Hann window correlates adjacent bins.
+    n_groups = min(_GATE_GROUPS, len(segs))
+    if n_groups < 4:
+        raise SnrError(
+            f"only {len(segs)} FFT segments -- too few to tell signal from "
+            f"noise. Capture at least {4 * nfft} samples.")
+    excess = []
+    for g in np.array_split(segs, n_groups):
+        g_psd = g.mean(axis=0)
+        excess.append(float(np.mean(g_psd[in_band]) / np.mean(g_psd[out_band])) - 1.0)
+    excess = np.array(excess)
+    stderr = float(excess.std(ddof=1)) / math.sqrt(n_groups)
+    significance = float(excess.mean()) / stderr if stderr > 0 else math.inf
+    if significance <= _GATE_SIGMAS:
+        raise SnrError(
+            f"no signal distinguishable from noise: the in-band excess is "
+            f"{significance:.1f} standard errors above zero, short of "
+            f"{_GATE_SIGMAS:g}. Capture more samples to push the floor down, "
+            "or accept that there is nothing here to point at.")
+
     snr_db = to_db(ratio)
     if not return_detail:
         return snr_db
@@ -265,6 +309,7 @@ def snr_psd(iq, fs, signal_bw, center=0.0, guard=None, nfft=4096,
         "bins_in": int(in_band.sum()),
         "bins_out": int(out_band.sum()),
         "bin_hz": fs / nfft,
+        "significance": significance,
         # C/N0 falls out of the same numbers and is the bandwidth-independent
         # way to compare two receivers or two dishes.
         "cn0_dbhz": snr_db + to_db(signal_bw),
@@ -275,34 +320,112 @@ def snr_psd(iq, fs, signal_bw, center=0.0, guard=None, nfft=4096,
 #  Capture
 # ---------------------------------------------------------------------------
 
-def capture_rtlsdr(freq_hz, fs=2_400_000, n_samples=1 << 18, gain="auto",
-                   device_index=0):
+# Thrown away after tuning, and by flush(): about 7 ms at 2.4 MS/s.
+SETTLE_SAMPLES = 16384
+
+
+def parse_gain(value):
     """
-    Grab a block of IQ from an RTL-SDR.
+    Tuner gain as pyrtlsdr wants it: the string 'auto' for the tuner's AGC,
+    or a number of dB. Raises ValueError for anything else.
+
+    A command line hands over '40' as a string, and pyrtlsdr's gain setter
+    checks only for 'auto' before doing arithmetic on what it was given, so
+    '40' raised TypeError at tune time, on the dongle. Also the argparse type
+    for --gain, so a bad value is refused before anything opens.
+    """
+    if isinstance(value, str):
+        if value.strip().lower() == "auto":
+            return "auto"
+        try:
+            value = float(value)
+        except ValueError:
+            raise ValueError(
+                f"gain must be 'auto' or a number of dB, not {value!r}") from None
+    gain = float(value)
+    if not math.isfinite(gain):
+        raise ValueError(f"gain must be 'auto' or a number of dB, not {value!r}")
+    return gain
+
+
+class RtlSdrCapture:
+    """
+    An RTL-SDR opened and tuned once, then read a block at a time.
+
+        with RtlSdrCapture(1694.1e6) as sdr:
+            for _ in range(10):
+                iq = sdr.read(1 << 18)
+
+    Opening is the expensive part -- USB setup, tuner init, the PLL locking
+    on the new frequency -- so a caller reading many blocks should hold one
+    of these rather than call capture_rtlsdr() per block.
 
     NOT RUN. There is no SDR on the machine this was written on, so unlike
     the estimators above -- which are checked against synthetic signals of
-    known SNR -- this function has never moved a sample. Treat it as a
-    sketch of the call sequence.
+    known SNR -- this has never moved a sample. The tests drive it against a
+    fake RtlSdr, which checks the call sequence and nothing about the dongle.
 
-    Requires pyrtlsdr. Remember that the device is single-client: this will
-    fail while SatDump holds it.
+    Requires pyrtlsdr. The device is single-client: while one of these is
+    open, nothing else -- SatDump, SDR#, the next run of this -- can open the
+    dongle. Use it in a `with`, or close() it in a finally.
     """
-    try:
-        from rtlsdr import RtlSdr
-    except ImportError as exc:
-        raise SnrError(
-            "pyrtlsdr is not installed (pip install pyrtlsdr), and it needs "
-            "librtlsdr present as well.") from exc
 
-    sdr = RtlSdr(device_index)
-    try:
-        sdr.sample_rate = fs
-        sdr.center_freq = freq_hz
-        sdr.gain = gain
-        # The first samples after retune are not trustworthy; the tuner PLL
-        # and the AGC both need a moment to settle.
-        sdr.read_samples(16384)
-        return sdr.read_samples(n_samples)
-    finally:
-        sdr.close()
+    def __init__(self, freq_hz, fs=2_400_000, gain="auto", device_index=0):
+        gain = parse_gain(gain)         # before opening, so a bad one opens nothing
+        try:
+            from rtlsdr import RtlSdr
+        except ImportError as exc:
+            raise SnrError(
+                "pyrtlsdr is not installed (pip install pyrtlsdr), and it needs "
+                "librtlsdr present as well.") from exc
+
+        self._sdr = RtlSdr(device_index)
+        try:
+            self._sdr.sample_rate = fs
+            self._sdr.center_freq = freq_hz
+            self._sdr.gain = gain
+            # The first samples after retune are not trustworthy; the tuner
+            # PLL and the AGC both need a moment to settle.
+            self.flush()
+        except BaseException:
+            self.close()
+            raise
+
+    def read(self, n_samples):
+        if self._sdr is None:
+            raise ValueError("read from a closed RtlSdrCapture")
+        return self._sdr.read_samples(n_samples)
+
+    def flush(self):
+        """
+        Throw away SETTLE_SAMPLES. Whatever the dongle buffered while nobody
+        was reading -- during a dish move, say -- comes out first otherwise.
+        """
+        self.read(SETTLE_SAMPLES)
+
+    def close(self):
+        """Release the dongle. Safe to call twice."""
+        if self._sdr is not None:
+            sdr, self._sdr = self._sdr, None
+            sdr.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def capture_rtlsdr(freq_hz, fs=2_400_000, n_samples=1 << 18, gain="auto",
+                   device_index=0):
+    """
+    Grab one block of IQ from an RTL-SDR: open, tune, read, close.
+
+    For a single block -- a check that samples flow at all. Anything that
+    reads block after block should hold an RtlSdrCapture open instead; this
+    pays the full open and settle every call. NOT RUN on hardware either,
+    for the reason given there.
+    """
+    with RtlSdrCapture(freq_hz, fs=fs, gain=gain,
+                       device_index=device_index) as sdr:
+        return sdr.read(n_samples)

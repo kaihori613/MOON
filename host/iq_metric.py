@@ -7,14 +7,14 @@ search on live SDR SNR exactly the way it already searches on a decoder
 metric -- same call, same contract, peak.py does not need to know the
 number came from an SDR instead of goesrecv or SatDump.
 
-STANDALONE ON PURPOSE, and deliberately not wired to the actuator or to
-peak.py yet. iq_snr.capture_rtlsdr() carries its own warning that it has
-never pulled a sample from real hardware; this file has not either. Point
-the dongle at the sky and get a believable SNR number out of --watch
+snr_peak.py now drives the actuator with this as its metric, but run this
+file ON ITS OWN first. iq_snr.RtlSdrCapture carries its own warning that it
+has never pulled a sample from real hardware; this file has not either.
+Point the dongle at the sky and get a believable SNR number out of --watch
 before trusting this for anything that moves a motor -- a search has no
 way to tell "good reading" from "capture is broken and returning garbage"
 on its own, which is exactly the m2m4 floor-refusal problem in iq_snr.py
-one level up.
+one level up. docs/snr-bringup.md has the order.
 
     python3 iq_metric.py --watch                          repeated readings
     python3 iq_metric.py --watch --signal-bw 1200000       use snr_psd (numpy)
@@ -32,7 +32,7 @@ import statistics
 import sys
 import time
 
-from iq_snr import SnrError, capture_rtlsdr, snr_m2m4, snr_psd
+from iq_snr import RtlSdrCapture, SnrError, parse_gain, snr_m2m4, snr_psd
 from metric import block_means
 
 GOES18_HRIT_HZ = 1_694_100_000.0
@@ -58,13 +58,18 @@ class SdrSnrMetric:
     lower_is_better is always False: this is SNR in dB, higher is better,
     never the Viterbi-style count that falls as pointing improves.
 
-    NOT TUNED FOR A TIGHT DWELL LOOP YET. capture_rtlsdr() opens and closes
-    the device on every call, which on most RTL-SDR units costs tens to
-    hundreds of milliseconds of USB and PLL settling on top of the samples
-    themselves. Fine for finding out whether the numbers make sense at all;
-    worth reworking to hold the device open across a whole dwell (or a whole
-    sweep) once this gets wired into peak.sweep(), where that overhead would
-    otherwise eat directly into the search's time budget.
+    THE DONGLE IS HELD OPEN. It is opened and tuned on the first reading
+    and kept, as an iq_snr.RtlSdrCapture, until close(): across every block
+    of a dwell and every sample() of a sweep. Reopening per block, as this
+    used to, pays USB setup and PLL settling before every block -- commonly
+    quoted at tens to hundreds of ms, never measured here -- so a 3 s dwell
+    averaged fewer blocks than it should have. How many it averages now is
+    unmeasured too: no dongle has been plugged into this code. Check n in
+    --watch's output; docs/snr-bringup.md step 2 says what to expect.
+
+    Because the RTL-SDR is single-client, an open metric locks everyone else
+    out of the dongle, including the next run. close() it -- or use it in a
+    `with` -- when done.
     """
 
     lower_is_better = False
@@ -86,6 +91,19 @@ class SdrSnrMetric:
         self.device_index = device_index
         self.signal_bw = signal_bw
         self.estimator = estimator
+        self._sdr = None            # RtlSdrCapture, opened on first reading
+
+    def close(self):
+        """Release the dongle, if open. A later reading reopens it."""
+        if self._sdr is not None:
+            sdr, self._sdr = self._sdr, None
+            sdr.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     def _use_psd(self) -> bool:
         if self.estimator == "psd":
@@ -98,9 +116,24 @@ class SdrSnrMetric:
         # that number is not something this project invents on your behalf.
         return _HAVE_NUMPY and self.signal_bw is not None
 
-    def _one_reading(self) -> float:
-        iq = capture_rtlsdr(self.freq_hz, fs=self.fs, n_samples=self.n_samples,
-                            gain=self.gain, device_index=self.device_index)
+    def _one_reading(self, flush=False) -> float:
+        try:
+            if self._sdr is None:
+                # Opening tunes and throws away a settling block, so a fresh
+                # device needs no flush as well.
+                self._sdr = RtlSdrCapture(self.freq_hz, fs=self.fs,
+                                          gain=self.gain,
+                                          device_index=self.device_index)
+            elif flush:
+                self._sdr.flush()
+            iq = self._sdr.read(self.n_samples)
+        except Exception:
+            # pyrtlsdr closes the device itself when a read fails or comes up
+            # short, so this handle may be dead. Drop it and let the next
+            # reading reopen: a USB hiccup then costs one sweep point, as it
+            # did when every block reopened, not every point after it.
+            self.close()
+            raise
         if self._use_psd():
             return snr_psd(iq, self.fs, self.signal_bw)
         return snr_m2m4(iq)
@@ -121,11 +154,16 @@ class SdrSnrMetric:
         deadline = time.time() + dwell
         values = []
         last_error = None
+        first = True
         while True:
             try:
-                values.append(self._one_reading())
+                # Flush before the first block: between sample() calls the
+                # dish has moved, and samples the dongle buffered meanwhile
+                # would be credited to the new angle.
+                values.append(self._one_reading(flush=first))
             except SnrError as exc:
                 last_error = str(exc)
+            first = False
             if time.time() >= deadline:
                 break
 
@@ -221,7 +259,9 @@ def main(argv=None):
                     help=f"center frequency, Hz (default {GOES18_HRIT_HZ/1e6:.1f} MHz, GOES-18 HRIT)")
     ap.add_argument("--fs", type=float, default=2_400_000.0, help="sample rate, Hz")
     ap.add_argument("--n-samples", type=int, default=1 << 18)
-    ap.add_argument("--gain", default="auto")
+    ap.add_argument("--gain", type=parse_gain, default="auto",
+                    help="tuner gain in dB, or 'auto' for its AGC (default). "
+                         "The tuner rounds to the nearest gain it supports.")
     ap.add_argument("--device-index", type=int, default=0)
     ap.add_argument("--signal-bw", type=float, default=None,
                     help="occupied bandwidth, Hz -- enables snr_psd (needs numpy). "
@@ -269,6 +309,8 @@ def main(argv=None):
     except IqMetricError as exc:
         print(exc, file=sys.stderr)
         return 1
+    finally:
+        metric.close()      # single-client: a held handle blocks the next run
     return 0
 
 

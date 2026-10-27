@@ -1,0 +1,162 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "SNR sim: peak in the middle (2 passes)",
+            "type": "debugpy",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "request": "launch",
+            "program": "${workspaceFolder}/host/snr_peak.py",
+            "args": [
+                "--simulate",
+                "--sweep",
+                "-8",
+                "8",
+                "1",
+                "--plot"
+            ],
+            "cwd": "${workspaceFolder}/host",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "SNR sim: peak near the edge (2 passes)",
+            "type": "debugpy",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "request": "launch",
+            "program": "${workspaceFolder}/host/snr_peak.py",
+            "args": [
+                "--simulate",
+                "--sweep",
+                "-8",
+                "8",
+                "1",
+                "--sim-peak",
+                "5.5",
+                "--plot"
+            ],
+            "cwd": "${workspaceFolder}/host",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "SNR sim: peak near the edge (1 pass, --no-refine)",
+            "type": "debugpy",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "request": "launch",
+            "program": "${workspaceFolder}/host/snr_peak.py",
+            "args": [
+                "--simulate",
+                "--sweep",
+                "-8",
+                "8",
+                "1",
+                "--sim-peak",
+                "5.5",
+                "--no-refine",
+                "--plot",
+                "sweep_one_pass.png"
+            ],
+            "cwd": "${workspaceFolder}/host",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "SNR sim: peak outside the range (should refuse)",
+            "type": "debugpy",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "request": "launch",
+            "program": "${workspaceFolder}/host/snr_peak.py",
+            "args": [
+                "--simulate",
+                "--sweep",
+                "-8",
+                "1",
+                "1",
+                "--plot"
+            ],
+            "cwd": "${workspaceFolder}/host",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "SNR sim: real (airy) beam, edge peak, one sweep",
+            "type": "debugpy",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "request": "launch",
+            "program": "${workspaceFolder}/host/snr_peak.py",
+            "args": [
+                "--simulate",
+                "--sweep",
+                "-8",
+                "8",
+                "1",
+                "--sim-beam",
+                "airy",
+                "--sim-peak",
+                "5.5",
+                "--plot",
+                "sweep_airy.png"
+            ],
+            "cwd": "${workspaceFolder}/host",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Monte Carlo: 200 sweeps, airy edge peak, 2 passes",
+            "type": "debugpy",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "request": "launch",
+            "program": "${workspaceFolder}/host/snr_peak.py",
+            "args": [
+                "--simulate",
+                "--sweep",
+                "-8",
+                "8",
+                "1",
+                "--sim-beam",
+                "airy",
+                "--sim-peak",
+                "5.5",
+                "--trials",
+                "200",
+                "--plot",
+                "sweep_mc_2pass.png"
+            ],
+            "cwd": "${workspaceFolder}/host",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Monte Carlo: 200 sweeps, airy edge peak, 1 pass",
+            "type": "debugpy",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "request": "launch",
+            "program": "${workspaceFolder}/host/snr_peak.py",
+            "args": [
+                "--simulate",
+                "--sweep",
+                "-8",
+                "8",
+                "1",
+                "--sim-beam",
+                "airy",
+                "--sim-peak",
+                "5.5",
+                "--trials",
+                "200",
+                "--no-refine",
+                "--plot",
+                "sweep_mc_1pass.png"
+            ],
+            "cwd": "${workspaceFolder}/host",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "All host tests (pytest)",
+            "type": "debugpy",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "-q"
+            ],
+            "cwd": "${workspaceFolder}/host",
+            "console": "integratedTerminal"
+        }
+    ]
+}
