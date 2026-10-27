@@ -7,14 +7,14 @@ search on live SDR SNR exactly the way it already searches on a decoder
 metric -- same call, same contract, peak.py does not need to know the
 number came from an SDR instead of goesrecv or SatDump.
 
-STANDALONE ON PURPOSE, and deliberately not wired to the actuator or to
-peak.py yet. iq_snr.capture_rtlsdr() carries its own warning that it has
-never pulled a sample from real hardware; this file has not either. Point
-the dongle at the sky and get a believable SNR number out of --watch
+snr_peak.py now drives the actuator with this as its metric, but run this
+file ON ITS OWN first. iq_snr.capture_rtlsdr() carries its own warning that
+it has never pulled a sample from real hardware; this file has not either.
+Point the dongle at the sky and get a believable SNR number out of --watch
 before trusting this for anything that moves a motor -- a search has no
 way to tell "good reading" from "capture is broken and returning garbage"
 on its own, which is exactly the m2m4 floor-refusal problem in iq_snr.py
-one level up.
+one level up. docs/snr-bringup.md has the order.
 
     python3 iq_metric.py --watch                          repeated readings
     python3 iq_metric.py --watch --signal-bw 1200000       use snr_psd (numpy)
@@ -58,13 +58,15 @@ class SdrSnrMetric:
     lower_is_better is always False: this is SNR in dB, higher is better,
     never the Viterbi-style count that falls as pointing improves.
 
-    NOT TUNED FOR A TIGHT DWELL LOOP YET. capture_rtlsdr() opens and closes
-    the device on every call, which on most RTL-SDR units costs tens to
-    hundreds of milliseconds of USB and PLL settling on top of the samples
-    themselves. Fine for finding out whether the numbers make sense at all;
-    worth reworking to hold the device open across a whole dwell (or a whole
-    sweep) once this gets wired into peak.sweep(), where that overhead would
-    otherwise eat directly into the search's time budget.
+    NOT TUNED FOR A TIGHT DWELL LOOP YET, AND NOW IT NEEDS TO BE.
+    capture_rtlsdr() opens and closes the device on every call, which on most
+    RTL-SDR units costs tens to hundreds of milliseconds of USB and PLL
+    settling on top of the samples themselves. snr_peak.py calls this inside
+    every sweep point, so that overhead is paid many times per dwell: the
+    sweep runs slower, and a 3 s dwell averages fewer blocks than it looks
+    like it should -- check n in --watch's output. The fix is to hold the
+    device open across a dwell, or a whole sweep. Do it before the first
+    real sweep; it can only be confirmed with a dongle plugged in.
     """
 
     lower_is_better = False

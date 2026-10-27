@@ -370,11 +370,28 @@ The two commands above, seeds 1000..1199:
 
 ## Setup
 
+From the repo root, in a virtual environment (on Windows the interpreter is
+`.venv\Scripts\python.exe`; [docs/dev-setup.md](../docs/dev-setup.md) has the
+full Windows setup, including the RTL-SDR driver):
+
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+.venv/Scripts/python -m pip install -r host/requirements.txt numpy matplotlib pytest "pyrtlsdr[lib]"
 ```
 
-Python 3.8+. The only dependency is pyserial.
+Python 3.8 or newer; 3.12 is what everything here is run on. Only `pyserial` is
+required. The rest are optional, and each only matters for part of `host/`:
+
+| package | needed for |
+|---|---|
+| `pyserial` | anything that talks to the Arduino |
+| `numpy` | the `snr_psd` estimator (`--signal-bw`); `snr_m2m4` needs nothing |
+| `pyrtlsdr[lib]` | reading the RTL-SDR. `[lib]` bundles librtlsdr, so Windows needs no separate download, but the dongle still needs its driver swapped to WinUSB with Zadig once |
+| `matplotlib` | `snr_peak.py --plot` |
+| `pytest` | running the tests |
+
+`snr_peak.py --simulate`, with or without `--trials` and `--sim-beam`, runs on
+the standard library alone.
 
 First run writes a blank `config.json` and stops:
 

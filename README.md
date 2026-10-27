@@ -22,20 +22,33 @@ channels, on two different boards, the same way. See
 why, and the voltage-margin caution right below it before trusting the
 HW-039 at this rail either.
 
-**Nothing in `actuator_v2` has been confirmed on hardware yet.** The
-PID/encoder loop is next to bench-test, in the order written up for that —
-encoder direction check, switches, then a small powered move — before any
-SDR-based peaking work builds on top of it.
+**The PID/encoder loop works on hardware, but not yet from this repo.** Luis
+([@lonulu](https://github.com/lonulu)) has `actuator_v2` holding angle on his
+bench, with local changes that are still to come in as a pull request. Until
+that merges, the copy here has only been syntax-checked, never run on hardware.
 
 **`host/`** is the Python side: compute where a geostationary satellite is
-from your coordinates, drive the actuator there over USB, and (in
-progress, on its own branch) close the loop using live SNR from an SDR
-instead of a human watching a signal meter. See [host/README.md](host/README.md).
+from your coordinates, drive the actuator there over USB, and close the loop
+using live SNR from an SDR instead of a human watching a signal meter
+(`snr_peak.py`). The SNR loop is complete in simulation and tested (165
+tests), but has not yet run on the dish or the RTL-SDR. Its first version is
+on `main`; development continues on the `sdr-snr-closed-loop` branch. See
+[host/README.md](host/README.md), and
+[docs/snr-bringup.md](docs/snr-bringup.md) for the order to bring it up on
+hardware.
+
+## Working on this
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers branches, pull requests and what to
+run before opening one. [docs/dev-setup.md](docs/dev-setup.md) sets up a
+Windows machine from nothing: Python, the tests, the compiler for the
+firmware check, VS Code and the RTL-SDR driver.
 
 ## `tools/`
 
 `syntax_check.sh` compiles every sketch (including `archive/`) with a host
-`g++` against stub Arduino headers — no `arduino-cli` needed. Catches typos,
+`g++` against stub Arduino headers — no `arduino-cli` needed. On Windows, run
+it from Git Bash; [docs/dev-setup.md](docs/dev-setup.md) installs the `g++`. Catches typos,
 missing declarations and `#ifdef` branches that have never been built;
 it does not catch anything that needs real hardware. `--matrix` also builds
 every `MOTOR_DRIVER`/feature-flag permutation for `actuator_v1` and
@@ -65,8 +78,10 @@ deleted outright once and had to be recovered from git history, twice.
 
 | | |
 |---|---|
-| [dish-log.md](docs/dish-log.md) | the project pitch: what this is and why |
+| [dish-log.md](docs/dish-log.md) | the project pitch: what this is and why, and the `actuator_v1` bench history |
 | [design-notes.md](docs/design-notes.md) | rationale from `actuator_v1` that exists nowhere else — anti-backlash policy, why zero sat at mid-stroke, why a saved position is checked rather than trusted |
+| [snr-bringup.md](docs/snr-bringup.md) | bringing the SNR peaking loop up on hardware, step by step, with pass criteria and a results log |
+| [dev-setup.md](docs/dev-setup.md) | setting up a Windows machine to work on this repo |
 
 Dated bench-session logs (calibration runs, linkage-geometry derivations,
 the reed-trust procedure) have been removed from the working tree as

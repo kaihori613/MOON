@@ -23,7 +23,10 @@ host/pointing.json
 host/sweep*.png
 
 # Editor / IDE
-.vscode/
+# Shared: the Run and Debug configurations (docs/dev-setup.md). Everything
+# else in .vscode/ is per-machine.
+.vscode/*
+!.vscode/launch.json
 *.swp
 *~
 
