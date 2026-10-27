@@ -32,7 +32,7 @@ import statistics
 import sys
 import time
 
-from iq_snr import RtlSdrCapture, SnrError, snr_m2m4, snr_psd
+from iq_snr import RtlSdrCapture, SnrError, parse_gain, snr_m2m4, snr_psd
 from metric import block_means
 
 GOES18_HRIT_HZ = 1_694_100_000.0
@@ -259,7 +259,9 @@ def main(argv=None):
                     help=f"center frequency, Hz (default {GOES18_HRIT_HZ/1e6:.1f} MHz, GOES-18 HRIT)")
     ap.add_argument("--fs", type=float, default=2_400_000.0, help="sample rate, Hz")
     ap.add_argument("--n-samples", type=int, default=1 << 18)
-    ap.add_argument("--gain", default="auto")
+    ap.add_argument("--gain", type=parse_gain, default="auto",
+                    help="tuner gain in dB, or 'auto' for its AGC (default). "
+                         "The tuner rounds to the nearest gain it supports.")
     ap.add_argument("--device-index", type=int, default=0)
     ap.add_argument("--signal-bw", type=float, default=None,
                     help="occupied bandwidth, Hz -- enables snr_psd (needs numpy). "

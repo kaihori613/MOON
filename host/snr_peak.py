@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from iq_metric import GOES18_HRIT_HZ, IqMetricError, SdrSnrMetric
+from iq_snr import parse_gain
 from peak import PointingReference, check_pointing, fit_peak, sweep
 
 # Mirrors of actuator_v2/Config.h. The sketch enforces its own copy of the
@@ -544,7 +545,8 @@ def main(argv=None):
     sdr.add_argument("--freq", type=float, default=GOES18_HRIT_HZ)
     sdr.add_argument("--fs", type=float, default=2_400_000.0)
     sdr.add_argument("--n-samples", type=int, default=1 << 18)
-    sdr.add_argument("--gain", default="auto")
+    sdr.add_argument("--gain", type=parse_gain, default="auto",
+                     help="tuner gain in dB, or 'auto' for its AGC (default)")
     sdr.add_argument("--device-index", type=int, default=0)
     sdr.add_argument("--signal-bw", type=float, default=None,
                      help="occupied bandwidth, Hz; enables snr_psd (needs numpy)")

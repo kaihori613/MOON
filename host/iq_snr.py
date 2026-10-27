@@ -60,7 +60,7 @@ from __future__ import annotations
 import math
 
 __all__ = ["snr_m2m4", "snr_psd", "SnrError", "to_db", "RtlSdrCapture",
-           "capture_rtlsdr"]
+           "capture_rtlsdr", "parse_gain"]
 
 
 class SnrError(RuntimeError):
@@ -324,6 +324,30 @@ def snr_psd(iq, fs, signal_bw, center=0.0, guard=None, nfft=4096,
 SETTLE_SAMPLES = 16384
 
 
+def parse_gain(value):
+    """
+    Tuner gain as pyrtlsdr wants it: the string 'auto' for the tuner's AGC,
+    or a number of dB. Raises ValueError for anything else.
+
+    A command line hands over '40' as a string, and pyrtlsdr's gain setter
+    checks only for 'auto' before doing arithmetic on what it was given, so
+    '40' raised TypeError at tune time, on the dongle. Also the argparse type
+    for --gain, so a bad value is refused before anything opens.
+    """
+    if isinstance(value, str):
+        if value.strip().lower() == "auto":
+            return "auto"
+        try:
+            value = float(value)
+        except ValueError:
+            raise ValueError(
+                f"gain must be 'auto' or a number of dB, not {value!r}") from None
+    gain = float(value)
+    if not math.isfinite(gain):
+        raise ValueError(f"gain must be 'auto' or a number of dB, not {value!r}")
+    return gain
+
+
 class RtlSdrCapture:
     """
     An RTL-SDR opened and tuned once, then read a block at a time.
@@ -347,6 +371,7 @@ class RtlSdrCapture:
     """
 
     def __init__(self, freq_hz, fs=2_400_000, gain="auto", device_index=0):
+        gain = parse_gain(gain)         # before opening, so a bad one opens nothing
         try:
             from rtlsdr import RtlSdr
         except ImportError as exc:

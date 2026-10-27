@@ -60,7 +60,7 @@ class FakeRtlSdr:
         self.closed = False
         dongle.devices.append(self)
 
-    def _setting(name):
+    def _setting(name, check=None):
         def get(self):
             return dict(self.settings)[name]
 
@@ -68,13 +68,21 @@ class FakeRtlSdr:
             exc = self.dongle.raise_on_setting.get(name)
             if exc is not None:
                 raise exc
+            if check is not None:
+                check(value)
             self.settings.append((name, value))
         return property(get, set_)
 
+    def _gain_check(value):
+        # pyrtlsdr's set_gain checks for 'auto', then does arithmetic on
+        # whatever else it got, so any other string raises this.
+        if isinstance(value, str) and value != "auto":
+            raise TypeError("unsupported operand type(s) for -: 'str' and 'int'")
+
     sample_rate = _setting("sample_rate")
     center_freq = _setting("center_freq")
-    gain = _setting("gain")
-    del _setting
+    gain = _setting("gain", _gain_check)
+    del _setting, _gain_check
 
     def read_samples(self, num_samples=1024):
         if self.closed:

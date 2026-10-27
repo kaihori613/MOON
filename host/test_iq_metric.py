@@ -21,7 +21,7 @@ import pytest
 import iq_metric
 from iq_metric import IqMetricError, SdrSnrMetric
 from iq_snr import (SETTLE_SAMPLES, RtlSdrCapture, SnrError, capture_rtlsdr,
-                    snr_m2m4, snr_psd)
+                    parse_gain, snr_m2m4, snr_psd)
 
 np = pytest.importorskip("numpy")
 
@@ -244,11 +244,62 @@ def test_capture_rtlsdr_is_still_one_shot(fake_rtlsdr):
 
 
 def test_capture_closes_the_device_if_tuning_fails(fake_rtlsdr):
-    fake_rtlsdr.raise_on_setting["gain"] = TypeError("bad gain")
-    with pytest.raises(TypeError):
-        RtlSdrCapture(1.6941e9, gain="40")
+    fake_rtlsdr.raise_on_setting["gain"] = OSError("LIBUSB_ERROR_IO")
+    with pytest.raises(OSError):
+        RtlSdrCapture(1.6941e9)
     assert len(fake_rtlsdr.devices) == 1
     assert fake_rtlsdr.still_open == []
+
+
+# --- gain --------------------------------------------------------------------
+
+@pytest.mark.parametrize("given, gain", [
+    ("auto", "auto"), ("AUTO", "auto"), ("40", 40.0), ("40.2", 40.2),
+    (" 0 ", 0.0), (40, 40.0), (49.6, 49.6),
+])
+def test_parse_gain(given, gain):
+    assert parse_gain(given) == gain
+    assert type(parse_gain(given)) is type(gain)
+
+
+@pytest.mark.parametrize("given", ["loud", "", "40dB", "nan", "inf"])
+def test_parse_gain_refuses_anything_else(given):
+    with pytest.raises(ValueError, match="'auto' or a number of dB"):
+        parse_gain(given)
+
+
+def test_capture_hands_pyrtlsdr_a_number_not_a_string(fake_rtlsdr):
+    """
+    '40' from a command line, or an old pointing.json. The real pyrtlsdr
+    raises TypeError on any string but 'auto', and so does the fake.
+    """
+    with RtlSdrCapture(1.6941e9, gain="40"):
+        pass
+    [dev] = fake_rtlsdr.devices
+    assert ("gain", 40.0) in dev.settings
+
+
+def test_capture_refuses_a_bad_gain_before_opening(fake_rtlsdr):
+    with pytest.raises(ValueError):
+        RtlSdrCapture(1.6941e9, gain="loud")
+    assert fake_rtlsdr.devices == []
+
+
+def test_watch_takes_a_numeric_gain(fake_rtlsdr, capsys):
+    fake_rtlsdr.raise_on_read[4] = KeyboardInterrupt()
+    assert iq_metric.main(["--watch", "--dwell", "0", "--gain", "40",
+                           "--n-samples", str(N)]) == 0
+    [dev] = fake_rtlsdr.devices
+    assert ("gain", 40.0) in dev.settings
+    assert "snr" in capsys.readouterr().out
+
+
+def test_watch_refuses_a_bad_gain_before_opening(fake_rtlsdr, capsys):
+    with pytest.raises(SystemExit) as exit_:
+        iq_metric.main(["--watch", "--gain", "loud"])
+    assert exit_.value.code == 2
+    assert fake_rtlsdr.devices == []
+    assert "--gain" in capsys.readouterr().err
 
 
 def test_capture_refuses_reads_once_closed(fake_rtlsdr):

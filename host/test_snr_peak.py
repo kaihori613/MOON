@@ -370,6 +370,33 @@ def test_main_sweep_then_check_open_the_dongle_once_per_run(fake_port,
     assert lk.closed
 
 
+def test_main_numeric_gain_reaches_the_dongle_and_the_reference(fake_port,
+                                                                fake_rtlsdr,
+                                                                tmp_path):
+    """--gain 40 used to reach pyrtlsdr as the string '40': a TypeError."""
+    lk = fake_port(FakeLink())
+    on_a_hill(fake_rtlsdr, lk)
+    args = _main_args(tmp_path, "--sweep", "-8", "8", "1") + ["--gain", "40"]
+    assert snr_peak.main(args) == 0
+    saved = json.loads((tmp_path / "pointing.json").read_text())
+    assert saved["sdr"]["gain"] == 40.0
+
+    assert snr_peak.main(_main_args(tmp_path, "--check")) == 0
+    for dev in fake_rtlsdr.devices:
+        assert ("gain", 40.0) in dev.settings
+
+
+def test_main_refuses_a_bad_gain_before_opening_anything(fake_port, fake_rtlsdr,
+                                                         tmp_path, capsys):
+    lk = fake_port(FakeLink())
+    args = _main_args(tmp_path, "--sweep", "-8", "8", "1") + ["--gain", "loud"]
+    with pytest.raises(SystemExit) as exit_:
+        snr_peak.main(args)
+    assert exit_.value.code == 2
+    assert fake_rtlsdr.devices == []
+    assert not lk.opened
+
+
 def test_main_releases_the_dongle_when_a_move_faults_mid_sweep(fake_port,
                                                                fake_rtlsdr,
                                                                tmp_path, capsys):
