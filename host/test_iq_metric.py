@@ -89,19 +89,44 @@ def test_psd_reads_known_snr(snr_db):
     assert got == pytest.approx(snr_db, abs=1.0)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "KNOWN BUG: snr_psd has no significance gate. On pure noise the in-band "
-    "density lands above the out-of-band one about half the time, and it "
-    "returns a number between roughly -45 and -19 dB instead of refusing. "
-    "snr_m2m4 guards against exactly this; snr_psd needs the same."))
 def test_psd_refuses_pure_noise():
+    """
+    Before the gate, half of these came back as numbers around -25 dB.
+    Measured over 1000 seeds the gate lets about 0.2% through -- the same
+    three-sigma rate snr_m2m4 runs at -- and none of these 20.
+    """
     numbers = []
     for seed in range(20):
         try:
             numbers.append(snr_psd(pure_noise(1 << 18, seed), FS, BW))
-        except SnrError:
-            pass
+        except SnrError as exc:
+            assert "no signal distinguishable" in str(exc) or "at or below" in str(exc)
     assert numbers == [], f"returned {len(numbers)}/20 numbers on pure noise"
+
+
+@pytest.mark.parametrize("snr_db", [-15.0, -13.0])
+def test_psd_gate_still_passes_weak_signals(snr_db):
+    """
+    The gate costs sensitivity only below about -17 dB in a 2^18 capture,
+    where the signal is the size of the noise's own scatter. This far down
+    the reading itself scatters by about 0.6 dB, gate or no gate, so the
+    tolerance is wider than for the strong signals above.
+    """
+    for seed in range(10):
+        got = snr_psd(band_limited_in_noise(snr_db, 1 << 18, seed=100 + seed), FS, BW)
+        assert got == pytest.approx(snr_db, abs=2.0)
+
+
+def test_psd_reports_its_significance():
+    _db, detail = snr_psd(band_limited_in_noise(0.0, 1 << 18, seed=1), FS, BW,
+                          return_detail=True)
+    assert detail["significance"] > 3.0
+
+
+def test_psd_refuses_a_capture_too_short_to_judge():
+    """Three segments of 4096 cannot say how much the excess wanders."""
+    with pytest.raises(SnrError, match="too few"):
+        snr_psd(band_limited_in_noise(10.0, 4096 * 2, seed=1), FS, BW)
 
 
 def test_psd_needs_noise_bins_outside_the_band():

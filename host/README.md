@@ -455,12 +455,17 @@ project's `.venv` (`pip install -r requirements.txt numpy pytest`):
 pytest
 ```
 
-133 passed and 1 expected failure as of 27 Oct 2026. The expected failure is a
-known bug, kept visible on purpose: `snr_psd` returns a number on pure noise
-about half the time instead of refusing the way `snr_m2m4` does. The marker is
-strict, so fixing the bug turns it into a failure until the marker is removed.
-`test_geometry.py` alone still needs nothing beyond the standard library:
-`python test_geometry.py`.
+138 passed as of 27 Oct 2026. `test_geometry.py` alone still needs nothing
+beyond the standard library: `python test_geometry.py`.
+
+Both SNR estimators refuse pure noise rather than return a number from it.
+`snr_psd` did not until 27 Oct 2026: it reported about half of all noise-only
+captures as SNRs near -25 dB, which a sweep would happily climb. It now splits
+the capture into 16 groups in time and needs the in-band excess three standard
+errors above zero. Over 1000 noise-only captures that let 2 through, where the
+old code let 504 through. Real signals read the same down to -15 dB. Fainter
+than about -17 dB in a 2^18-sample capture, the estimator now refuses them as
+well, because by then the signal is the size of the noise's own scatter.
 
 ## Files
 

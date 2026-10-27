@@ -168,8 +168,19 @@ def snr_m2m4(iq) -> float:
 #  Spectral estimator -- needs numpy
 # ---------------------------------------------------------------------------
 
+# snr_psd's noise gate: how many groups the capture is split into in time,
+# and how many standard errors the in-band excess must clear.
+_GATE_GROUPS = 16
+_GATE_SIGMAS = 3.0
+
+
 def _welch(iq, fs, nfft, overlap=0.5):
-    """Averaged periodogram, returned as (freqs, psd) with DC in the middle."""
+    """
+    Welch periodograms, returned as (freqs, segments) with DC in the middle:
+    one row per windowed segment, in time order. The averaged PSD is
+    segments.mean(axis=0); the rows are kept so snr_psd can see how much
+    that average would wander.
+    """
     import numpy as np
 
     x = np.asarray(iq, dtype=np.complex128)
@@ -182,18 +193,14 @@ def _welch(iq, fs, nfft, overlap=0.5):
     # something that changes when the window or the length changes.
     scale = 1.0 / (fs * (win * win).sum())
 
-    acc = np.zeros(nfft)
-    count = 0
-    for start in range(0, x.size - nfft + 1, step):
-        seg = x[start:start + nfft] * win
-        acc += np.abs(np.fft.fft(seg)) ** 2
-        count += 1
-    if count == 0:
+    starts = range(0, x.size - nfft + 1, step)
+    if len(starts) == 0:
         raise SnrError("no complete segments")
+    segs = np.array([np.abs(np.fft.fft(x[s:s + nfft] * win)) ** 2 for s in starts])
 
-    psd = np.fft.fftshift(acc / count) * scale
+    segs = np.fft.fftshift(segs, axes=1) * scale
     freqs = np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / fs))
-    return freqs, psd
+    return freqs, segs
 
 
 def snr_psd(iq, fs, signal_bw, center=0.0, guard=None, nfft=4096,
@@ -221,13 +228,18 @@ def snr_psd(iq, fs, signal_bw, center=0.0, guard=None, nfft=4096,
     With return_detail, also returns the densities and the bin counts, which
     is what you want when the number looks wrong -- almost always because the
     noise window landed on another signal.
+
+    Raises SnrError when the in-band excess is not significantly above what
+    noise alone produces -- the same rule snr_m2m4 applies, for the same
+    reason. See the gate below.
     """
     import numpy as np
 
     if guard is None:
         guard = signal_bw * 0.5
 
-    freqs, psd = _welch(iq, fs, nfft)
+    freqs, segs = _welch(iq, fs, nfft)
+    psd = segs.mean(axis=0)
     off = freqs - center
 
     in_band = np.abs(off) <= (signal_bw * 0.5)
@@ -256,6 +268,36 @@ def snr_psd(iq, fs, signal_bw, center=0.0, guard=None, nfft=4096,
             "no signal here above the noise. For a search this is the correct "
             "answer, not a failure -- the dish is not pointed at it.")
 
+    # On PURE noise the in-band density is above the out-of-band one half the
+    # time, by chance, and the line above lets every one of those through as
+    # a number around -25 dB. That is snr_m2m4's dangerous failure exactly: a
+    # search decides -24 dB beats -25 dB and walks the dish uphill on noise.
+    #
+    # So ask whether the excess is bigger than its own scatter. Split the
+    # segments into consecutive groups in time, measure the excess in each,
+    # and require the mean to sit three standard errors above zero. Groups
+    # far apart in time have independent noise, which is what makes their
+    # scatter honest; measuring it across neighbouring frequency bins instead
+    # would not be, because a Hann window correlates adjacent bins.
+    n_groups = min(_GATE_GROUPS, len(segs))
+    if n_groups < 4:
+        raise SnrError(
+            f"only {len(segs)} FFT segments -- too few to tell signal from "
+            f"noise. Capture at least {4 * nfft} samples.")
+    excess = []
+    for g in np.array_split(segs, n_groups):
+        g_psd = g.mean(axis=0)
+        excess.append(float(np.mean(g_psd[in_band]) / np.mean(g_psd[out_band])) - 1.0)
+    excess = np.array(excess)
+    stderr = float(excess.std(ddof=1)) / math.sqrt(n_groups)
+    significance = float(excess.mean()) / stderr if stderr > 0 else math.inf
+    if significance <= _GATE_SIGMAS:
+        raise SnrError(
+            f"no signal distinguishable from noise: the in-band excess is "
+            f"{significance:.1f} standard errors above zero, short of "
+            f"{_GATE_SIGMAS:g}. Capture more samples to push the floor down, "
+            "or accept that there is nothing here to point at.")
+
     snr_db = to_db(ratio)
     if not return_detail:
         return snr_db
@@ -265,6 +307,7 @@ def snr_psd(iq, fs, signal_bw, center=0.0, guard=None, nfft=4096,
         "bins_in": int(in_band.sum()),
         "bins_out": int(out_band.sum()),
         "bin_hz": fs / nfft,
+        "significance": significance,
         # C/N0 falls out of the same numbers and is the bandwidth-independent
         # way to compare two receivers or two dishes.
         "cn0_dbhz": snr_db + to_db(signal_bw),
