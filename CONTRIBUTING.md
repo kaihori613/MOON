@@ -49,6 +49,11 @@ Run what applies to what you changed. Say in the PR what you ran.
 | any sketch, or `Config.h` | `bash tools/syntax_check.sh --matrix` — 0 failed | repo root, in Git Bash |
 | firmware you've flashed | a note of what you saw on hardware | the PR description |
 
+CI (`.github/workflows/ci.yml`) runs the pytest and `--matrix` rows on every PR
+into `main`, as `host-tests` and `firmware-syntax`, and both must pass before it
+can merge. It doesn't run the simulated sweep or touch hardware, so those rows
+are still yours.
+
 **Say plainly what was tested on hardware and what wasn't.** "Simulated only"
 and "ran on the bench, moved to g 5 and held" are both fine. What isn't fine is
 leaving the reader to guess, because on this project a passing simulation and a
