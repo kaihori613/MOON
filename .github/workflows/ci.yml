@@ -1,0 +1,41 @@
+# Runs the host test suite and the firmware syntax matrix on every PR into
+# main, so a review starts from a known-green branch instead of "I ran it
+# on my machine".
+#
+# Nothing here touches hardware: no dongle, no serial port, no Arduino.
+# pyrtlsdr is left out on purpose -- no test opens an SDR, and the tests
+# that need numpy or matplotlib importorskip them, so installing both here
+# just means those tests run instead of skipping.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -r host/requirements.txt numpy matplotlib pytest
+      - run: python -m pytest -q
+        working-directory: host
+        env:
+          MPLBACKEND: Agg
+
+  firmware-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # host g++ against the stub headers in tools/arduino_stub; exits
+      # non-zero unless the last line reads "0 failed".
+      - run: bash tools/syntax_check.sh --matrix
