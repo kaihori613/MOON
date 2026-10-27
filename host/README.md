@@ -73,13 +73,30 @@ records what the metric read at the peak; the check compares against it and
 reports one of `ok`, `improved`, `degraded`, `failed` or `no-signal`. It never
 moves anything — the caller decides what to do.
 
-The threshold is `max(fixed, 3σ)`, where σ combines the noise on the reference
-and on the current reading. That is the same principle as the reed's debounce
-and the moment estimator's significance gate, and it exists because a system
-that reacts to its own measurement noise will re-peak a perfectly good dish on
-a windy afternoon and store whatever it happens to find. Tested against 200
-samples of a healthy but noisy link: zero false re-peaks, while a genuine 9 dB
-drop on that same link was still caught.
+The threshold is `max(fixed, 3σ)`. The fixed part is 2 dB for `degraded` and
+4 dB for `failed`. σ combines how much the reference average and the current
+average each wander: the standard error, `stdev/√n`, not the scatter of the
+single readings inside them. It exists because a system that reacts to its own
+measurement noise will re-peak a perfectly good dish on a windy afternoon and
+store whatever it happens to find.
+
+An earlier version used the raw scatter, which overstated the noise by `√n`
+and pushed the threshold to about 4 dB. Simulated with 1 dB of scatter per
+reading, a 10-reading check against a 30-reading reference, and 2,000 trials
+per row:
+
+| drop | flagged, raw scatter | flagged, standard error |
+|---|---|---|
+| 0 dB | 0% | 0% |
+| 2.5 dB | 0.4% | 92% |
+| 3 dB (≈6° off on a 12° beam) | 3% | 99.8% |
+| 4 dB | 40% | 100% |
+
+Slow changes between sessions, like weather or gain drift, never appear inside
+one dwell, so σ can't see them. The fixed floor is what absorbs those.
+
+A reference saved without its `n` falls back to the raw scatter, which errs
+toward missing a drop rather than raising a false one.
 
 Given a beamwidth it also reports how much pointing error would explain the
 drop, by inverting the loss law. A 3 dB drop on a 12° beam comes back as 6.0° —
@@ -257,6 +274,38 @@ buys nothing measurable. Either switch to a metric that does not saturate, or
 accept that anywhere in the flat region is a valid answer — which, for a
 geostationary bird you only peak once, it is.
 
+## Peaking on SDR SNR with `actuator_v2`
+
+`snr_peak.py` closes the outer loop. It drives `actuator_v2` through
+`peak.sweep()` with `g <deg>` targets, and reads SNR from the RTL-SDR with
+`iq_metric.py` at each point once the PID has landed. `moon_yaw.py` cannot do
+this: it speaks `actuator_v1`, whose `g` takes reed counts.
+
+```bash
+python snr_peak.py --simulate --sweep -8 8 1     # whole loop, fake dish, no hardware
+python iq_metric.py --watch                       # the SDR on its own, first
+python snr_peak.py --port COM3 --sweep -8 8 1    # peak, park, save pointing.json
+python snr_peak.py --port COM3 --check           # is SNR still what the sweep found?
+```
+
+Only run it on hardware once both halves work alone: the PID holding a `g`
+target typed into the serial console, and `--watch` giving believable numbers.
+
+- **Before anything moves**, it refuses a sketch that isn't `actuator_v2`, a
+  controller that is already faulted, a range past the ±13° soft limit, and an
+  SDR that won't deliver samples.
+- **During the sweep**, a move that lands more than 0.6° from its target aborts
+  it. That means the move was refused, or a panel button took over, and a
+  reading there would be credited to the wrong angle.
+- **Any failure** returns the dish to where it was before the sweep, not to the
+  first swept angle.
+- **`pointing.json`** holds the peak angle, the reference SNR and the exact SDR
+  settings. `--check` reuses those settings, because an SNR from a different
+  estimator or gain can't be compared with the reference. The file is
+  gitignored because it belongs to this site, like `config.json`.
+- **`--check` never re-peaks on its own.** A drop can be rain or a wet LNA, and
+  re-peaking on that would store a worse aim than the saved one.
+
 ## Setup
 
 ```bash
@@ -410,7 +459,9 @@ one that works:
 
 | file | |
 |---|---|
-| `moon_yaw.py` | entry point: automatic cycle, then manual tuning |
+| `moon_yaw.py` | entry point for `actuator_v1`: automatic cycle, then manual tuning |
+| `snr_peak.py` | entry point for `actuator_v2`: peak on SDR SNR, then check against it |
+| `iq_metric.py` | live SNR from the RTL-SDR, in the shape `peak.sweep()` reads |
 | `geometry.py` | look angles to a geostationary satellite; linkage models |
 | `link.py` | serial transport, speaks the sketch's existing console protocol |
 | `config.py` | site, linkage and trim persistence |

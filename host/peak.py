@@ -38,6 +38,7 @@ was the good one.
 
 from __future__ import annotations
 
+import math
 import time
 
 __all__ = ["sweep", "parabolic_peak", "parabolic_fit", "PeakResult", "PeakError"]
@@ -285,10 +286,12 @@ class PointingReference:
     """
 
     def __init__(self, angle, metric_mean, metric_stdev, metric_name="",
-                 lower_is_better=False, when=None, beamwidth_deg=None):
+                 lower_is_better=False, when=None, beamwidth_deg=None,
+                 metric_n=None):
         self.angle = angle
         self.metric_mean = metric_mean
-        self.metric_stdev = metric_stdev
+        self.metric_stdev = metric_stdev      # scatter of the single readings
+        self.metric_n = metric_n              # how many were averaged
         self.metric_name = metric_name
         self.lower_is_better = lower_is_better
         self.when = when
@@ -300,7 +303,8 @@ class PointingReference:
 
     def to_dict(self):
         return {"angle_deg": self.angle, "metric_mean": self.metric_mean,
-                "metric_stdev": self.metric_stdev, "metric_name": self.metric_name,
+                "metric_stdev": self.metric_stdev, "metric_n": self.metric_n,
+                "metric_name": self.metric_name,
                 "lower_is_better": self.lower_is_better, "when": self.when,
                 "beamwidth_deg": self.beamwidth_deg}
 
@@ -308,7 +312,7 @@ class PointingReference:
     def from_dict(cls, d):
         return cls(d["angle_deg"], d["metric_mean"], d.get("metric_stdev", 0.0),
                    d.get("metric_name", ""), d.get("lower_is_better", False),
-                   d.get("when"), d.get("beamwidth_deg"))
+                   d.get("when"), d.get("beamwidth_deg"), d.get("metric_n"))
 
 
 class HealthVerdict:
@@ -335,6 +339,16 @@ class HealthVerdict:
         return f"<HealthVerdict {self.status}: {self.message}>"
 
 
+def _stderr(stdev, n):
+    # A reference saved before n was recorded has only its raw scatter. Using
+    # that as-is errs toward missing a drop rather than raising a false one.
+    if not stdev:
+        return 0.0
+    if not n or n < 2:
+        return stdev
+    return stdev / math.sqrt(n)
+
+
 def check_pointing(reference, read_metric, warn=2.0, fail=4.0, sigmas=3.0):
     """
     Compare the metric now against what calibration recorded.
@@ -349,7 +363,7 @@ def check_pointing(reference, read_metric, warn=2.0, fail=4.0, sigmas=3.0):
     Never moves anything. It reports; the caller decides.
     """
     try:
-        mean, stdev, _n = read_metric()
+        mean, stdev, n = read_metric()
     except Exception as exc:
         return HealthVerdict(
             HealthVerdict.NO_SIGNAL, message=f"no reading at all ({exc})")
@@ -357,7 +371,17 @@ def check_pointing(reference, read_metric, warn=2.0, fail=4.0, sigmas=3.0):
     now_score = -mean if reference.lower_is_better else mean
     drop = reference.score - now_score          # positive means worse
 
-    noise = ((reference.metric_stdev ** 2 + stdev ** 2) ** 0.5) * sigmas
+    # The two numbers being compared are AVERAGES, so the noise that matters
+    # is how much an average wanders -- the standard error, stdev/sqrt(n) --
+    # not the scatter of the single readings inside it. Using the raw scatter
+    # overstates the noise by sqrt(n): with ~1 dB per SDR block it put the
+    # threshold near 4 dB, past a 3 dB drop that is worth catching.
+    #
+    # Slow changes between sessions -- weather, gain drift -- do not show up
+    # inside one dwell at all, so they are not in this number either. That is
+    # what the fixed warn/fail floor is for.
+    noise = math.hypot(_stderr(reference.metric_stdev, reference.metric_n),
+                       _stderr(stdev, n)) * sigmas
     warn_at = max(warn, noise)
     fail_at = max(fail, noise)
 

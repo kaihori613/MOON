@@ -32,7 +32,8 @@ except ImportError:  # pragma: no cover - import guard for a clearer message
         "    pip install -r requirements.txt")
 
 
-BANNER = "Actuator System Bench Console"
+BANNERS = ("Actuator System Bench Console",   # actuator_v1
+           "MOON actuator_v2")                # actuator_v2
 
 # printStatus() emits space separated key=value pairs. 'travel=? (run c)'
 # trails a parenthesised hint, which this pattern simply ignores.
@@ -68,7 +69,7 @@ class ActuatorLink:
             line = self._readline()
             if line is None:
                 continue
-            if BANNER in line:
+            if any(b in line for b in BANNERS):
                 self.saw_banner = True
                 break
 
