@@ -9,11 +9,17 @@ hardware on his bench. Setting up a machine: [docs/dev-setup.md](docs/dev-setup.
 `main` is protected on GitHub:
 
 - **Nothing is pushed to `main` directly.** Every change arrives through a pull
-  request, and the PR needs **one approving review** from the other person.
+  request.
+- **Both CI checks must pass** before a PR can merge: `host-tests` and
+  `firmware-syntax` (see [Before opening a PR](#before-opening-a-pr)).
+- **No approving review is required.** Since 27 Oct 2026, either of you can
+  merge a PR once its checks are green. A second pair of eyes is still worth
+  asking for on anything that changes the firmware or the serial protocol,
+  because CI can't tell whether the dish still moves correctly.
 - **Force pushes and deleting `main` are blocked.**
 - **The owner can bypass these rules,** because they don't apply to admins.
-  Keep that for a fix that can't wait for a review. A change merged that way
-  has had nobody else look at it.
+  With no review required, the only thing a bypass skips is CI. Don't use it
+  unless the checks themselves are what's broken.
 
 The flow:
 
@@ -27,7 +33,8 @@ The flow:
    `luis/actuator-pid`.
 3. Commit, push, and open a PR into `main`. Mark it **Draft** while it is still
    in progress.
-4. The other person reviews and approves. The author merges.
+4. Wait for both CI checks to go green, ask the other person to look if it
+   touches the firmware or the protocol, then merge.
 5. Delete the branch once it's merged, unless work continues on it.
 
 **Long-running branches** (like `sdr-snr-closed-loop`) should take in `main`
