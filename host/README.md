@@ -292,12 +292,73 @@ python snr_peak.py --port COM3 --check           # is SNR still what the sweep f
 Only run it on hardware once both halves work alone: the PID holding a `g`
 target typed into the serial console, and `--watch` giving believable numbers.
 
+### What the simulation randomizes, and Monte Carlo
+
+The fake dish has its own random number generator, seeded with `--sim-seed`;
+without a seed, each run differs. Two things in it are random:
+
+- **Every SNR reading** is the beam's true value plus Gaussian noise of 1 dB.
+  At 10 readings a second, a 3 s dwell averages 30 of them.
+- **Every move** lands at the target plus a uniform offset of up to ±0.25°,
+  standing in for the PID's deadband.
+
+The noise model is an assumption until `iq_metric.py --noise` measures the
+real one. It has no slow drift (gain, weather), which the real SDR will have.
+
+One `--simulate` run is one random example. Two options turn it into a study:
+
+```bash
+python snr_peak.py --simulate --sweep -8 8 1 --sim-beam airy --sim-peak 5.5 --trials 200
+python snr_peak.py --simulate --sweep -8 8 1 --sim-beam airy --sim-peak 5.5 --trials 200 --no-refine --plot mc.png
+```
+
+- **`--sim-beam airy`** replaces the parabolic beam with a real circular
+  dish's pattern. The parabola is exactly what the fit assumes, so it can only
+  ever show noise. The Airy beam matches it to within 0.03 dB out to half the
+  beamwidth, then falls faster: 7.4 dB down at 9° against the parabola's 6.75.
+  That difference is what makes a one-flank fit lean.
+- **`--trials N`** runs N sweeps quietly and prints the median, 90th
+  percentile, worst and **signed mean** of how far the peak landed from the
+  truth. Noise scatters the answer evenly around zero. A model error shifts
+  the whole scatter to one side, and only the signed mean shows that. With
+  `--plot`, it draws a histogram instead of a sweep.
+
+The two commands above, seeds 1000..1199:
+
+| | median | worst | signed mean |
+|---|---|---|---|
+| one pass | 0.303° | 0.672° | **−0.290°** |
+| two passes | 0.037° | 0.190° | +0.009° |
+
 - **Before anything moves**, it refuses a sketch that isn't `actuator_v2`, a
   controller that is already faulted, a range past the ±13° soft limit, and an
   SDR that won't deliver samples.
 - **During the sweep**, a move that lands more than 0.6° from its target aborts
   it. That means the move was refused, or a panel button took over, and a
-  reading there would be credited to the wrong angle.
+  reading there would be credited to the wrong angle. Inside that tolerance,
+  each reading is credited to where the move actually landed, not where it
+  was sent.
+- **It sweeps twice**, unless you pass `--no-refine`. The second pass is centred
+  on the first pass's peak, half a beamwidth (6°) either side, at half the
+  step. The peak is then fitted to both passes together. This roughly 2.5×
+  the sweep time.
+  - **Why it's wide, not narrow:** a narrow fine pass (±2° at 0.25°) measured
+    about three times *worse* than no second pass at all. Every new reading
+    sits on the flat top, where the beam changes less than the noise does.
+  - **What it fixes:** a peak near the end of the `--sweep` range leaves the
+    first pass with only one flank. On a real beam, which is not quite a
+    parabola, the fit then leans toward that flank. In simulation on an Airy
+    beam with the peak at +4° to +6.5° on a −8..8 sweep, the fitted peak was
+    0.29° off (median), and averaging longer did not help. With the second
+    pass it was 0.04°.
+  - **It may go past LO..HI**, never past the ±13° soft limit. Kept inside the
+    typed range, an edge peak gets one flank again, and the error went back to
+    0.22°.
+  - **What it doesn't fix:** where the dish finally parks is limited by the
+    PID's ±0.25° deadband, about 0.12° median, which is now bigger than the
+    fit's own error. On a 12° beam that costs under 0.01 dB. Even the
+    one-pass worst case, 0.95°, costs 0.07 dB. The second pass matters more
+    for a narrower beam: a bigger dish or a higher frequency.
 - **Any failure** returns the dish to where it was before the sweep, not to the
   first swept angle.
 - **`pointing.json`** holds the peak angle, the reference SNR and the exact SDR
@@ -455,7 +516,7 @@ project's `.venv` (`pip install -r requirements.txt numpy pytest`):
 pytest
 ```
 
-138 passed as of 27 Oct 2026. `test_geometry.py` alone still needs nothing
+165 passed as of 27 Oct 2026. `test_geometry.py` alone still needs nothing
 beyond the standard library: `python test_geometry.py`.
 
 Both SNR estimators refuse pure noise rather than return a number from it.

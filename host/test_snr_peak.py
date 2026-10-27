@@ -13,6 +13,8 @@ aim, a 'g' sent to a sketch that reads it as reed counts.
 """
 
 import json
+import math
+import statistics
 
 import pytest
 
@@ -374,3 +376,226 @@ def test_missing_matplotlib_does_not_fail_the_sweep(monkeypatch, tmp_path, capsy
             "--plot", str(tmp_path / "s.png")]
     assert snr_peak.main(args) == 0
     assert "no plot" in capsys.readouterr().err
+
+
+# --- the refining pass -----------------------------------------------------
+
+class SincBeam(HillMetric):
+    """
+    A uniform-aperture beam, sinc^2 -- deliberately NOT the parabola the fit
+    assumes, which is what the refining pass exists to cope with. -3 dB at
+    half the beamwidth; anything 20 dB down reads as nothing.
+    """
+
+    def sample(self, dwell, settle=0.0):
+        x = 1.3916 * 2.0 * (self.where() - self.peak_deg) / self.beamwidth
+        g = 1.0 if abs(x) < 1e-9 else (math.sin(x) / x) ** 2
+        db = self.peak_db + 10.0 * math.log10(max(g, 1e-12))
+        if db < self.peak_db - 20.0:
+            raise snr_peak.IqMetricError("nothing above the floor")
+        return db, 0.5, 30
+
+
+def _fine_commands(lk, coarse_n=17):
+    """The refining pass's moves: after the coarse pass, before the park."""
+    return lk.commands[coarse_n:-1]
+
+
+def test_refine_sweeps_half_a_beamwidth_each_side_at_half_the_step():
+    lk = FakeLink(pos=1.5)
+    ref, result = _sweep(lk, HillMetric(lambda: lk.pos))
+    fine = _fine_commands(lk)
+    assert result.coarse.best_angle == pytest.approx(2.7, abs=1e-6)
+    assert fine[0] == pytest.approx(2.7 - 6.0, abs=1e-6)
+    assert fine[-1] == pytest.approx(2.7 + 6.0, abs=1e-6)
+    assert len(fine) == 25
+    assert fine[1] - fine[0] == pytest.approx(0.5)
+    assert lk.commands[-1] == pytest.approx(result.best_angle)
+    # one fit over both passes
+    assert len(result.samples) == 17 + 25
+
+
+def test_refine_may_pass_the_typed_range_but_never_the_soft_limit():
+    lk = FakeLink(pos=0.0)
+    _sweep(lk, HillMetric(lambda: lk.pos, peak_deg=9.0), lo=-4, hi=12, step=1)
+    fine = _fine_commands(lk, coarse_n=17)
+    assert max(fine) == pytest.approx(SOFT_LIMIT_DEG)      # 9 + 6 clipped to 13
+    assert max(lk.commands) <= SOFT_LIMIT_DEG
+
+
+def test_no_refine_is_one_pass():
+    lk = FakeLink(pos=1.5)
+    ref, result = run_sweep(Actuator(lk), HillMetric(lambda: lk.pos), -8, 8, 1,
+                            settle=0.0, dwell=0.0, ref_dwell=0.0,
+                            metric_name="test", refine=False)
+    assert result.coarse is None
+    assert len(lk.commands) == 17 + 1         # the sweep and the park
+
+
+def test_refine_removes_the_bias_of_a_one_sided_fit():
+    """
+    Peak near the end of the coarse range on a beam that is not a parabola:
+    the coarse points all sit on one flank and the fit leans toward it. No
+    noise here, so all of the error is that bias.
+    """
+    lk = FakeLink(pos=0.0)
+    ref, result = _sweep(lk, SincBeam(lambda: lk.pos, peak_deg=5.5))
+    coarse_err = abs(result.coarse.best_angle - 5.5)
+    refined_err = abs(result.best_angle - 5.5)
+    assert coarse_err > 0.2
+    assert refined_err < coarse_err / 3
+
+
+def test_coarse_failure_skips_the_refining_pass():
+    lk = FakeLink(pos=1.5)
+    ref, result = _sweep(lk, HillMetric(lambda: lk.pos, peak_deg=9.0),
+                         lo=-8, hi=0, step=1)
+    assert ref is None
+    assert len(lk.commands) == 9 + 1          # coarse pass, then back to start
+    assert lk.commands[-1] == 1.5
+
+
+def test_refined_reference_records_the_coarse_peak(tmp_path):
+    lk = FakeLink(pos=1.5)
+    ref, result = _sweep(lk, HillMetric(lambda: lk.pos))
+    path = tmp_path / "pointing.json"
+    save_reference(path, ref, {"freq_hz": 1.0}, result, -8, 8, 1)
+    saved = json.loads(path.read_text())["sweep"]
+    assert saved["coarse_peak"] == pytest.approx(2.7, abs=1e-6)
+    assert saved["coarse_points"] == 17
+    assert len(saved["points"]) == 42
+
+
+def test_simulate_without_refine_still_runs():
+    args = ["--simulate", "--sweep", "-8", "8", "1", "--sim-seed", "3", "--no-refine"]
+    assert snr_peak.main(args) == 0
+
+
+# --- peak.sweep / fit_peak -------------------------------------------------
+
+def test_readings_are_credited_to_where_the_move_landed():
+    from peak import sweep
+    landed = []
+
+    def move_to(a):
+        landed.append(a + 0.2)
+        return a + 0.2
+
+    result = sweep(move_to, lambda: (1.0, 0.1, 10), 0, 4, 1, settle=0,
+                   park=False, return_on_failure=False)
+    assert [s[0] for s in result.samples] == pytest.approx(landed)
+
+
+def test_a_mover_that_returns_nothing_is_credited_the_commanded_angle():
+    from peak import sweep
+    result = sweep(lambda a: None, lambda: (1.0, 0.1, 10), 0, 4, 1, settle=0,
+                   park=False, return_on_failure=False)
+    assert [s[0] for s in result.samples] == [0, 1, 2, 3, 4]
+
+
+def test_sweep_never_steps_past_hi():
+    """Accumulating 0.5 twenty-five times overshoots 13 by 2e-15."""
+    from peak import sweep
+    sent = []
+    sweep(lambda a: sent.append(a), lambda: (1.0, 0.1, 10), 1.0, 13.0, 0.5,
+          settle=0, park=False, return_on_failure=False)
+    assert len(sent) == 25
+    assert max(sent) == 13.0
+
+
+def test_fit_peak_sorts_samples_from_two_passes():
+    from peak import fit_peak
+    pts = [(a, 10 - (a - 1.0) ** 2, 0.1, 10) for a in (-2, 0, 2, 4)]
+    pts += [(a, 10 - (a - 1.0) ** 2, 0.1, 10) for a in (-1, 1, 3)]
+    result = fit_peak(pts)
+    assert [s[0] for s in result.samples] == [-2, -1, 0, 1, 2, 3, 4]
+    assert result.best_angle == pytest.approx(1.0)
+
+
+# --- the realistic beam, and Monte Carlo trials ----------------------------
+
+from snr_peak import beam_loss_db, bessel_j1, run_trials  # noqa: E402
+
+
+@pytest.mark.parametrize("x, j1", [
+    (0.0, 0.0),
+    (1.0, 0.4400505857449335),          # tabulated
+    (-1.0, -0.4400505857449335),        # odd function
+    (3.8317059702075125, 0.0),          # first zero
+    (5.0, -0.3275791375914652),
+])
+def test_bessel_j1_matches_tables(x, j1):
+    assert bessel_j1(x) == pytest.approx(j1, abs=1e-10)
+
+
+@pytest.mark.parametrize("beam", ["parabola", "airy"])
+def test_both_beams_are_3db_down_at_half_the_beamwidth(beam):
+    assert beam_loss_db(0.0, 12.0, beam) == 0.0
+    assert beam_loss_db(6.0, 12.0, beam) == pytest.approx(3.0, abs=0.02)
+    assert beam_loss_db(-6.0, 12.0, beam) == pytest.approx(3.0, abs=0.02)
+
+
+def test_airy_falls_faster_than_the_parabola_down_the_flanks():
+    """The difference the fit cannot model, and the refining pass corrects."""
+    assert beam_loss_db(9.0, 12.0, "airy") > beam_loss_db(9.0, 12.0, "parabola") + 0.5
+    assert beam_loss_db(12.0, 12.0, "airy") > beam_loss_db(12.0, 12.0, "parabola") + 4.0
+
+
+def test_unknown_beam_is_refused():
+    with pytest.raises(ValueError):
+        SimDish(0.0, beam="horn")
+
+
+def test_trials_are_repeatable_with_a_seed(capsys):
+    a = run_trials(5, 2.7, "parabola", -8, 8, 1, 3.0, 10.0, True, seed=42)
+    b = run_trials(5, 2.7, "parabola", -8, 8, 1, 3.0, 10.0, True, seed=42)
+    assert a["fitted"] == b["fitted"]
+    assert a["found"] == 5
+    assert "5 simulated sweeps" in capsys.readouterr().out
+
+
+def test_trials_show_the_one_pass_bias_on_a_real_beam_and_refine_removes_it():
+    """
+    The case --trials exists for: an edge peak on an Airy beam. The one-pass
+    fit leans the same way every time -- a mean far from zero -- and the
+    two-pass fit does not.
+    """
+    one = run_trials(40, 5.5, "airy", -8, 8, 1, 3.0, 10.0, False, seed=7)
+    two = run_trials(40, 5.5, "airy", -8, 8, 1, 3.0, 10.0, True, seed=7)
+    one_bias = statistics.fmean(one["fitted"])
+    two_bias = statistics.fmean(two["fitted"])
+    assert one_bias < -0.15
+    assert abs(two_bias) < 0.05
+
+
+def test_trials_need_simulate():
+    with pytest.raises(SystemExit):
+        snr_peak.main(["--port", "COM9", "--sweep", "-8", "8", "1", "--trials", "5"])
+
+
+def test_trials_must_be_positive():
+    with pytest.raises(SystemExit):
+        snr_peak.main(["--simulate", "--sweep", "-8", "8", "1", "--trials", "0"])
+
+
+def test_simulate_refuses_a_bad_range_up_front(capsys):
+    assert snr_peak.main(["--simulate", "--sweep", "-20", "8", "1"]) == 2
+    assert "soft limit" in capsys.readouterr().err
+
+
+def test_trials_plot_writes_a_histogram(tmp_path):
+    pytest.importorskip("matplotlib")
+    png = tmp_path / "mc.png"
+    args = ["--simulate", "--sweep", "-8", "8", "1", "--sim-beam", "airy",
+            "--trials", "5", "--sim-seed", "1", "--plot", str(png)]
+    assert snr_peak.main(args) == 0
+    assert png.read_bytes()[:8] == PNG_MAGIC
+
+
+def test_airy_single_run_plot(tmp_path):
+    pytest.importorskip("matplotlib")
+    png = tmp_path / "airy.png"
+    args = ["--simulate", "--sweep", "-8", "8", "1", "--sim-beam", "airy",
+            "--sim-seed", "1", "--plot", str(png)]
+    assert snr_peak.main(args) == 0
+    assert png.read_bytes()[:8] == PNG_MAGIC
