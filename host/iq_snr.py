@@ -38,7 +38,8 @@ time, not in parallel:
     while SatDump runs      ->  satdump.py, to refine on the decoder metric
 
 which happens to fit a scheduled recording exactly: peak while the SDR is
-free, then hand it over.
+free, then hand it over -- which means closing it first. RtlSdrCapture holds
+the device open across many reads, so whatever holds one must close it.
 
 TWO ESTIMATORS
 
@@ -58,7 +59,8 @@ from __future__ import annotations
 
 import math
 
-__all__ = ["snr_m2m4", "snr_psd", "SnrError", "to_db"]
+__all__ = ["snr_m2m4", "snr_psd", "SnrError", "to_db", "RtlSdrCapture",
+           "capture_rtlsdr"]
 
 
 class SnrError(RuntimeError):
@@ -318,34 +320,87 @@ def snr_psd(iq, fs, signal_bw, center=0.0, guard=None, nfft=4096,
 #  Capture
 # ---------------------------------------------------------------------------
 
-def capture_rtlsdr(freq_hz, fs=2_400_000, n_samples=1 << 18, gain="auto",
-                   device_index=0):
+# Thrown away after tuning, and by flush(): about 7 ms at 2.4 MS/s.
+SETTLE_SAMPLES = 16384
+
+
+class RtlSdrCapture:
     """
-    Grab a block of IQ from an RTL-SDR.
+    An RTL-SDR opened and tuned once, then read a block at a time.
+
+        with RtlSdrCapture(1694.1e6) as sdr:
+            for _ in range(10):
+                iq = sdr.read(1 << 18)
+
+    Opening is the expensive part -- USB setup, tuner init, the PLL locking
+    on the new frequency -- so a caller reading many blocks should hold one
+    of these rather than call capture_rtlsdr() per block.
 
     NOT RUN. There is no SDR on the machine this was written on, so unlike
     the estimators above -- which are checked against synthetic signals of
-    known SNR -- this function has never moved a sample. Treat it as a
-    sketch of the call sequence.
+    known SNR -- this has never moved a sample. The tests drive it against a
+    fake RtlSdr, which checks the call sequence and nothing about the dongle.
 
-    Requires pyrtlsdr. Remember that the device is single-client: this will
-    fail while SatDump holds it.
+    Requires pyrtlsdr. The device is single-client: while one of these is
+    open, nothing else -- SatDump, SDR#, the next run of this -- can open the
+    dongle. Use it in a `with`, or close() it in a finally.
     """
-    try:
-        from rtlsdr import RtlSdr
-    except ImportError as exc:
-        raise SnrError(
-            "pyrtlsdr is not installed (pip install pyrtlsdr), and it needs "
-            "librtlsdr present as well.") from exc
 
-    sdr = RtlSdr(device_index)
-    try:
-        sdr.sample_rate = fs
-        sdr.center_freq = freq_hz
-        sdr.gain = gain
-        # The first samples after retune are not trustworthy; the tuner PLL
-        # and the AGC both need a moment to settle.
-        sdr.read_samples(16384)
-        return sdr.read_samples(n_samples)
-    finally:
-        sdr.close()
+    def __init__(self, freq_hz, fs=2_400_000, gain="auto", device_index=0):
+        try:
+            from rtlsdr import RtlSdr
+        except ImportError as exc:
+            raise SnrError(
+                "pyrtlsdr is not installed (pip install pyrtlsdr), and it needs "
+                "librtlsdr present as well.") from exc
+
+        self._sdr = RtlSdr(device_index)
+        try:
+            self._sdr.sample_rate = fs
+            self._sdr.center_freq = freq_hz
+            self._sdr.gain = gain
+            # The first samples after retune are not trustworthy; the tuner
+            # PLL and the AGC both need a moment to settle.
+            self.flush()
+        except BaseException:
+            self.close()
+            raise
+
+    def read(self, n_samples):
+        if self._sdr is None:
+            raise ValueError("read from a closed RtlSdrCapture")
+        return self._sdr.read_samples(n_samples)
+
+    def flush(self):
+        """
+        Throw away SETTLE_SAMPLES. Whatever the dongle buffered while nobody
+        was reading -- during a dish move, say -- comes out first otherwise.
+        """
+        self.read(SETTLE_SAMPLES)
+
+    def close(self):
+        """Release the dongle. Safe to call twice."""
+        if self._sdr is not None:
+            sdr, self._sdr = self._sdr, None
+            sdr.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def capture_rtlsdr(freq_hz, fs=2_400_000, n_samples=1 << 18, gain="auto",
+                   device_index=0):
+    """
+    Grab one block of IQ from an RTL-SDR: open, tune, read, close.
+
+    For a single block -- a check that samples flow at all. Anything that
+    reads block after block should hold an RtlSdrCapture open instead; this
+    pays the full open and settle every call. NOT RUN on hardware either,
+    for the reason given there.
+    """
+    with RtlSdrCapture(freq_hz, fs=fs, gain=gain,
+                       device_index=device_index) as sdr:
+        return sdr.read(n_samples)

@@ -331,6 +331,92 @@ def test_simulate_runs_end_to_end():
     assert snr_peak.main(args) == 0
 
 
+# --- main(): the dongle, opened once and always released --------------------
+#
+# The real SdrSnrMetric over conftest.py's FakeRtlSdr. The dongle is
+# single-client, so a run that leaves it open blocks the next one.
+
+def on_a_hill(dongle, lk, peak_deg=2.7, peak_db=12.0):
+    """Serve blocks whose SNR follows a 12 deg beam around the fake link."""
+    dongle.block = lambda: dongle.signal(
+        peak_db - 12.0 * ((lk.pos - peak_deg) / 12.0) ** 2)
+
+
+def _main_args(tmp_path, *mode):
+    return ["--port", "COM9", *mode, "--ref", str(tmp_path / "pointing.json"),
+            "--settle", "0", "--dwell", "0", "--ref-dwell", "0"]
+
+
+def test_main_sweep_then_check_open_the_dongle_once_per_run(fake_port,
+                                                            fake_rtlsdr, tmp_path):
+    lk = fake_port(FakeLink())
+    on_a_hill(fake_rtlsdr, lk)
+
+    assert snr_peak.main(_main_args(tmp_path, "--sweep", "-8", "8", "1")) == 0
+    [dev] = fake_rtlsdr.devices
+    assert dev.closed and lk.closed
+    assert dev.settings == [("sample_rate", 2_400_000.0),
+                            ("center_freq", snr_peak.GOES18_HRIT_HZ),
+                            ("gain", "auto")]
+    readings = dev.reads.count(1 << 18)
+    assert readings > 30                    # both passes and the reference
+    # one settle on opening, then one flush per later dwell
+    assert dev.reads.count(16384) == readings
+
+    lk.closed = False
+    assert snr_peak.main(_main_args(tmp_path, "--check")) == 0
+    assert len(fake_rtlsdr.devices) == 2
+    assert fake_rtlsdr.still_open == []
+    assert lk.closed
+
+
+def test_main_releases_the_dongle_when_a_move_faults_mid_sweep(fake_port,
+                                                               fake_rtlsdr,
+                                                               tmp_path, capsys):
+    lk = fake_port(FakeLink(fault_on_move=lambda a: a >= 0))
+    on_a_hill(fake_rtlsdr, lk)
+    assert snr_peak.main(_main_args(tmp_path, "--sweep", "-8", "8", "1")) == 1
+    assert len(fake_rtlsdr.devices) == 1    # it was open: -8..-1 were read
+    assert fake_rtlsdr.still_open == []
+    assert lk.closed
+    assert "stall" in capsys.readouterr().err
+
+
+def test_main_releases_the_dongle_on_an_unexpected_error(fake_port, fake_rtlsdr,
+                                                         tmp_path, capsys):
+    def land(angle):
+        if angle >= 0:
+            raise RuntimeError("not one of the errors main() expects")
+        return angle
+
+    lk = fake_port(FakeLink(land=land))
+    on_a_hill(fake_rtlsdr, lk)
+    with pytest.raises(RuntimeError):
+        snr_peak.main(_main_args(tmp_path, "--sweep", "-8", "8", "1"))
+    assert len(fake_rtlsdr.devices) == 1
+    assert fake_rtlsdr.still_open == []
+    assert lk.closed
+
+
+@pytest.mark.parametrize("mode", ["sweep", "check"])
+def test_main_releases_the_dongle_on_ctrl_c(fake_port, fake_rtlsdr, tmp_path,
+                                            mode, capsys):
+    lk = fake_port(FakeLink())
+    on_a_hill(fake_rtlsdr, lk)
+    if mode == "check":
+        assert snr_peak.main(_main_args(tmp_path, "--sweep", "-8", "8", "1")) == 0
+        lk.closed = False
+        args = _main_args(tmp_path, "--check")
+    else:
+        args = _main_args(tmp_path, "--sweep", "-8", "8", "1")
+    fake_rtlsdr.raise_on_read[fake_rtlsdr.reads + 2] = KeyboardInterrupt()
+
+    assert snr_peak.main(args) == 130
+    assert fake_rtlsdr.devices[-1].reads        # it was open when interrupted
+    assert fake_rtlsdr.still_open == []
+    assert lk.closed
+
+
 # --- --plot ----------------------------------------------------------------
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"

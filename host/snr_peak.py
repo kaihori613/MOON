@@ -626,6 +626,9 @@ def main(argv=None):
         else:
             settings = sdr_settings(args)
             validate_range(*args.sweep)
+        # Opens nothing yet: the dongle is opened on the first reading, inside
+        # the try below whose finally closes it. preflight_sdr opens and
+        # closes its own.
         metric = metric_from(settings)
         preflight_sdr(settings)
     except errors as exc:
@@ -678,7 +681,12 @@ def main(argv=None):
         print("\ninterrupted -- stopping the motor")
         return 130
     finally:
-        link.close()      # sends the bare-newline stop on the way out
+        try:
+            link.close()      # sends the bare-newline stop on the way out
+        finally:
+            # The metric holds the dongle open from its first reading. It is
+            # single-client, so a handle left open blocks the next run.
+            metric.close()
 
 
 if __name__ == "__main__":

@@ -20,7 +20,8 @@ import pytest
 
 import iq_metric
 from iq_metric import IqMetricError, SdrSnrMetric
-from iq_snr import SnrError, snr_m2m4, snr_psd
+from iq_snr import (SETTLE_SAMPLES, RtlSdrCapture, SnrError, capture_rtlsdr,
+                    snr_m2m4, snr_psd)
 
 np = pytest.importorskip("numpy")
 
@@ -138,15 +139,28 @@ def test_psd_needs_noise_bins_outside_the_band():
 
 @pytest.fixture
 def fake_capture(monkeypatch):
-    """Replace the RTL-SDR with a list of blocks, served in turn."""
+    """
+    Replace the held-open RTL-SDR with a list of blocks, served in turn. Its
+    settling reads are not modelled here; fake_rtlsdr below checks those.
+    """
     def use(blocks):
         it = iter(blocks * 1000)
         calls = []
 
-        def capture(freq_hz, fs, n_samples, gain, device_index):
-            calls.append(freq_hz)
-            return next(it)
-        monkeypatch.setattr(iq_metric, "capture_rtlsdr", capture)
+        class Capture:
+            def __init__(self, freq_hz, fs, gain, device_index):
+                pass
+
+            def read(self, n_samples):
+                calls.append(n_samples)
+                return next(it)
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+        monkeypatch.setattr(iq_metric, "RtlSdrCapture", Capture)
         return calls
     return use
 
@@ -198,3 +212,130 @@ def test_estimator_choice(estimator, signal_bw, psd):
 def test_unknown_estimator_is_refused():
     with pytest.raises(ValueError):
         SdrSnrMetric(1.6941e9, estimator="magic")
+
+
+# --- the dongle, held open --------------------------------------------------
+#
+# Against conftest.py's FakeRtlSdr, so these check the call sequence only:
+# how often the device is opened, tuned, read and closed. Whether holding it
+# open makes a real dwell average more blocks needs a real dongle.
+
+N = 8192        # samples per block, small so the m2m4 tests stay fast
+
+
+def test_capture_opens_and_tunes_once_for_many_reads(fake_rtlsdr):
+    with RtlSdrCapture(1.6941e9, fs=2.4e6, gain=40.2, device_index=1) as sdr:
+        for _ in range(3):
+            sdr.read(N)
+    [dev] = fake_rtlsdr.devices
+    assert dev.device_index == 1
+    assert dev.settings == [("sample_rate", 2.4e6), ("center_freq", 1.6941e9),
+                            ("gain", 40.2)]
+    assert dev.reads == [SETTLE_SAMPLES, N, N, N]   # settle once, after tuning
+    assert dev.closed
+
+
+def test_capture_rtlsdr_is_still_one_shot(fake_rtlsdr):
+    iq = capture_rtlsdr(1.6941e9, n_samples=N)
+    [dev] = fake_rtlsdr.devices
+    assert len(iq) == N
+    assert dev.reads == [SETTLE_SAMPLES, N]
+    assert dev.closed
+
+
+def test_capture_closes_the_device_if_tuning_fails(fake_rtlsdr):
+    fake_rtlsdr.raise_on_setting["gain"] = TypeError("bad gain")
+    with pytest.raises(TypeError):
+        RtlSdrCapture(1.6941e9, gain="40")
+    assert len(fake_rtlsdr.devices) == 1
+    assert fake_rtlsdr.still_open == []
+
+
+def test_capture_refuses_reads_once_closed(fake_rtlsdr):
+    sdr = RtlSdrCapture(1.6941e9)
+    sdr.close()
+    sdr.close()                                     # twice is harmless
+    with pytest.raises(ValueError, match="closed"):
+        sdr.read(N)
+
+
+def test_metric_opens_nothing_until_the_first_reading(fake_rtlsdr):
+    metric = SdrSnrMetric(1.6941e9, n_samples=N)
+    assert fake_rtlsdr.devices == []
+    metric.close()                                  # closing unopened is fine
+
+
+def test_metric_opens_once_across_a_dwell_of_many_blocks(fake_rtlsdr):
+    metric = SdrSnrMetric(1.6941e9, n_samples=N)
+    mean, _sd, n = metric.sample(0.2)
+    assert n > 1
+    assert mean == pytest.approx(10.0, abs=1.0)
+    [dev] = fake_rtlsdr.devices
+    assert dev.reads == [SETTLE_SAMPLES] + [N] * n
+    assert not dev.closed
+    metric.close()
+    assert dev.closed
+
+
+def test_metric_opens_and_tunes_once_across_several_dwells(fake_rtlsdr):
+    metric = SdrSnrMetric(1.6941e9, fs=2.4e6, n_samples=N, gain=40.2,
+                          device_index=1)
+    counts = [metric.sample(0.05)[2] for _ in range(4)]
+    metric.close()
+
+    [dev] = fake_rtlsdr.devices
+    assert dev.device_index == 1
+    assert dev.settings == [("sample_rate", 2.4e6), ("center_freq", 1.6941e9),
+                            ("gain", 40.2)]
+    # One settle when it opened, then one flush ahead of each later dwell,
+    # for whatever the dongle buffered while the dish was moving.
+    assert dev.reads.count(SETTLE_SAMPLES) == 4
+    assert dev.reads.count(N) == sum(counts)
+    assert fake_rtlsdr.still_open == []
+
+
+def test_metric_reopens_after_a_failed_read(fake_rtlsdr):
+    """
+    A USB error costs that reading, not every one after it: pyrtlsdr has
+    closed the device itself, so the metric must drop it and reopen.
+    """
+    metric = SdrSnrMetric(1.6941e9, n_samples=N)
+    metric.sample(0.0)                              # reads 1 (settle) and 2
+    fake_rtlsdr.raise_on_read[3] = OSError("LIBUSB_ERROR_IO")
+    with pytest.raises(OSError):
+        metric.sample(0.0)                          # read 3 is the flush
+    assert fake_rtlsdr.still_open == []
+    _mean, _sd, n = metric.sample(0.0)
+    assert n == 1
+    assert len(fake_rtlsdr.devices) == 2
+    metric.close()
+    assert fake_rtlsdr.still_open == []
+
+
+def test_metric_with_block_closes_even_on_an_exception(fake_rtlsdr):
+    with pytest.raises(RuntimeError):
+        with SdrSnrMetric(1.6941e9, n_samples=N) as metric:
+            metric.sample(0.0)
+            raise RuntimeError("something else went wrong")
+    assert len(fake_rtlsdr.devices) == 1
+    assert fake_rtlsdr.still_open == []
+
+
+def test_watch_closes_the_dongle_on_ctrl_c(fake_rtlsdr, capsys):
+    fake_rtlsdr.raise_on_read[6] = KeyboardInterrupt()
+    assert iq_metric.main(["--watch", "--dwell", "0", "--n-samples", str(N)]) == 0
+    assert len(fake_rtlsdr.devices) == 1
+    assert fake_rtlsdr.still_open == []
+    assert "snr" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_noise_closes_the_dongle(fake_rtlsdr, interrupt, capsys):
+    if interrupt:
+        fake_rtlsdr.raise_on_read[5] = KeyboardInterrupt()
+    assert iq_metric.main(["--noise", "--seconds", "0.3",
+                           "--n-samples", str(N)]) == 0
+    if interrupt:
+        assert fake_rtlsdr.reads == 5
+    assert len(fake_rtlsdr.devices) == 1
+    assert fake_rtlsdr.still_open == []

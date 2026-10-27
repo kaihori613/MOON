@@ -25,10 +25,10 @@ python -c "from link import ActuatorLink; print(ActuatorLink.list_ports())"
 - [ ] If the actuator's serial protocol changed in that merge (`g`, `s`, `k`,
       the status line, the boot banner), `link.py` and `snr_peak.py` were
       updated to match.
-- [ ] `iq_metric.py`'s dongle overhead is dealt with, or knowingly accepted.
-      `capture_rtlsdr()` currently reopens the dongle for every block of
-      samples, so a sweep runs slower, and averages fewer blocks per dwell,
-      than its settings suggest. See the `SdrSnrMetric` docstring.
+- [x] `iq_metric.py` no longer reopens the dongle for every block of samples.
+      `SdrSnrMetric` opens it on the first reading and holds it until the run
+      ends (see its docstring). This has only been tested against a fake
+      dongle; step 2 is where it meets the real one.
 
 ## 1. The actuator alone
 
@@ -59,13 +59,20 @@ Do the Zadig driver swap first ([dev-setup.md](dev-setup.md#5-the-rtl-sdr)).
 | `python -c "from rtlsdr import librtlsdr; print(librtlsdr.rtlsdr_get_device_count())"` | `1` |
 | `python -c "from iq_snr import capture_rtlsdr; print(len(capture_rtlsdr(1694.1e6, n_samples=16384)))"` | `16384` (samples are flowing) |
 | `python iq_metric.py --watch`, with the LNA unpowered or the dish well off target | every line says `no reading: no signal distinguishable from noise` |
+| `Ctrl+C` out of `--watch`, then run it again straight away | it opens the dongle again, so the first run let go of it |
 
-**The last row is the important one.** On real noise, the estimator must refuse
+**The third row is the important one.** On real noise, the estimator must refuse
 rather than print a number. If it prints SNRs here, a sweep would climb toward
 noise. Stop and investigate before going further.
 
 Also note the `n=` that `--watch` prints, once a signal is present (step 3):
-that's how many blocks one 3 s dwell actually averaged.
+that's how many blocks one 3 s dwell actually averaged. With the dongle held
+open, each block should cost the capture (109 ms for 2^18 samples at
+2.4 MS/s) plus the estimator. On the dev laptop the estimator took about
+200 ms per block for `snr_m2m4` and 20 ms for `snr_psd`, measured on synthetic
+blocks. So expect roughly 10 blocks per 3 s dwell with `snr_m2m4` and 20 with
+`snr_psd`. If you see far fewer, something is still slow on every block.
+Record what you see either way.
 
 ## 3. The dongle with the satellite
 

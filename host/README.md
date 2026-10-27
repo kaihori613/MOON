@@ -561,6 +561,7 @@ well, because by then the signal is the size of the noise's own scatter.
 | `test_snr_peak.py` | the outer loop's safety rules, against a fake link and dish |
 | `test_check_pointing.py` | when an SNR drop is real enough to call for a re-peak |
 | `test_iq_metric.py` | both SNR estimators and `SdrSnrMetric` on synthetic IQ |
+| `conftest.py` | a fake pyrtlsdr, so the tests can check the dongle is opened once and always closed |
 
 `link.py` deliberately sends only commands you could have typed by hand into
 the Serial Monitor. When something misbehaves, unplug the script, open the
